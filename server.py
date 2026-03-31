@@ -51,8 +51,6 @@ else:
 # (key, label, category, is_secret)
 ENV_VARS = [
     ("LLM_MODEL",               "Model",                    "model",     False),
-    ("OPENAI_API_KEY",           "OpenAI",                   "provider",  True),
-    ("ANTHROPIC_API_KEY",        "Anthropic",                "provider",  True),
     ("OPENROUTER_API_KEY",       "OpenRouter",               "provider",  True),
     ("DEEPSEEK_API_KEY",         "DeepSeek",                 "provider",  True),
     ("DASHSCOPE_API_KEY",        "DashScope",                "provider",  True),
