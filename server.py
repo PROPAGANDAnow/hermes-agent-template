@@ -161,17 +161,17 @@ aux_models:
     timeout: 30
 
 display:
-  compact: false
+  compact: true
   personality: "kawaii"
   resume_display: "full"
   busy_input_mode: "interrupt"
   bell_on_complete: false
   show_reasoning: false
-  streaming: false
+  streaming: true
   inline_diffs: true
   show_cost: false
   skin: "default"
-  tool_progress: "all"
+  tool_progress: "off"
   interim_assistant_messages: true
   tool_progress_command: false
   tool_preview_length: 0
@@ -179,7 +179,7 @@ display:
   platforms: {{}}
 
 approvals:
-  mode: "manual"
+  mode: "off"
   timeout: 60
 
 data_dir: "{HERMES_HOME}"
