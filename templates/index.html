@@ -529,7 +529,18 @@
     min-height:240px; max-height:420px; overflow:auto; background:#0a0c10; border:1px solid var(--border); border-radius:8px;
     padding:14px 16px; font-family:var(--font-mono); font-size:12px; line-height:1.55; white-space:pre-wrap; word-break:break-word;
   }
-</style>
+
+  /* ── Files ────────────────────────────────────────── */
+  .files-layout { display:grid; grid-template-columns: 340px minmax(0, 1fr); gap:16px; min-height:0; }
+  .file-list { display:flex; flex-direction:column; gap:8px; max-height:620px; overflow:auto; }
+  .file-row {
+    border:1px solid var(--border); border-radius:8px; padding:10px 12px; background:var(--surface); cursor:pointer;
+    transition:border-color 0.15s, background 0.15s;
+  }
+  .file-row:hover, .file-row.active { border-color:var(--accent); background:var(--surface2); }
+  .file-pathbar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:12px; }
+  .file-editor { width:100%; min-height:520px; resize:vertical; font-family:var(--font-mono); font-size:12px; line-height:1.5; }
+
 </head>
 <body x-data="app()" x-init="init()" x-cloak>
 
@@ -589,6 +600,12 @@
          @click="isSetupDone && (page='crons', loadCrons())">
       <span class="nav-icon">⏲</span>
       <span>Crons</span>
+    </div>
+    <div class="nav-item"
+         :class="{active: page==='files', locked: !isSetupDone}"
+         @click="isSetupDone && (page='files', loadFiles())">
+      <span class="nav-icon">▣</span>
+      <span>Files</span>
     </div>
 
     <div class="nav-divider" style="margin-top:auto;"></div>
@@ -1011,6 +1028,66 @@
       </div>
     </div>
 
+    <!-- ── Files panel ─────────────────────────────── -->
+    <div class="panel" :class="{active: page==='files'}">
+      <div class="panel-header">
+        <div class="panel-title">Files</div>
+        <div class="panel-subtitle" x-text="files.selectedPath || (files.currentPath || '/')"></div>
+      </div>
+      <div class="panel-body">
+        <div class="files-layout">
+          <div>
+            <div class="card">
+              <label class="field-label">Root</label>
+              <select x-model="files.root" @change="changeFileRoot(files.root)">
+                <template x-for="(rootPath, rootName) in files.roots" :key="rootName">
+                  <option :value="rootName" x-text="rootName + ' — ' + rootPath"></option>
+                </template>
+              </select>
+              <div class="file-pathbar">
+                <button class="btn sm" @click="goUpDirectory()" :disabled="!files.parentPath && !files.currentPath">Up</button>
+                <button class="btn sm" @click="loadFiles()">Refresh</button>
+                <button class="btn sm" @click="newFileFromPrompt()">New File</button>
+              </div>
+              <div class="hint" x-text="'Current path: ' + (files.currentPath || '/')"></div>
+            </div>
+
+            <div class="card" style="margin-top:16px;">
+              <div class="file-list">
+                <template x-for="entry in files.entries" :key="entry.type + ':' + entry.path">
+                  <div class="file-row" :class="{active: files.selectedPath===entry.path}" @click="entry.type==='dir' ? openDirectory(entry.path) : openFile(entry.path)">
+                    <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;">
+                      <div style="font-weight:500;" x-text="(entry.type==='dir' ? '📁 ' : '📄 ') + entry.name"></div>
+                      <span class="chip dim" x-text="entry.type"></span>
+                    </div>
+                    <div class="hint" x-text="entry.path || '/'"></div>
+                  </div>
+                </template>
+                <div class="empty-state" x-show="files.entries.length===0">No files in this directory.</div>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <div class="card">
+              <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:12px;">
+                <div>
+                  <div class="field-label">Editor</div>
+                  <div class="hint" x-text="files.selectedPath || 'Select a text file or create a new one' "></div>
+                </div>
+                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                  <span class="chip yellow" x-show="files.dirty">Unsaved</span>
+                  <button class="btn primary" @click="saveFile()" :disabled="!files.selectedPath || !files.dirty || files.saving">Save</button>
+                </div>
+              </div>
+              <textarea class="file-editor" x-model="files.content" @input="markFileDirty()" :disabled="!files.selectedPath" placeholder="Open a file from the explorer to edit it here."></textarea>
+              <p class="hint" x-show="files.error" x-text="files.error"></p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- ── Users panel ─────────────────────────────── -->
     <div class="panel" :class="{active: page==='users'}">
       <div class="panel-header">
@@ -1118,6 +1195,18 @@ function app() {
     cronSelectedOutput: '',
     cronOutputContent: '',
     cronSearch: '',
+    files: {
+      roots: {},
+      root: 'data',
+      currentPath: '',
+      parentPath: '',
+      entries: [],
+      selectedPath: '',
+      content: '',
+      dirty: false,
+      saving: false,
+      error: '',
+    },
 
     tools,
 
@@ -1201,6 +1290,7 @@ function app() {
       setInterval(() => { if (this.page === 'terminal') this.loadTerminalStatus(); }, 2500);
       setInterval(() => { if (this.page === 'terminal') this.pollTerminalOutput(); }, 1200);
       setInterval(() => { if (this.page === 'crons') this.loadCrons(false); }, 10000);
+      setInterval(() => { if (this.page === 'files') this.loadFiles(false); }, 15000);
     },
 
     async loadConfig() {
@@ -1535,6 +1625,114 @@ function app() {
       } catch {
         this.notify('Clipboard copy failed', false);
       }
+    },
+
+    async loadFiles(preserveSelection = true) {
+      try {
+        const query = new URLSearchParams({ root: this.files.root || 'data', path: this.files.currentPath || '' });
+        const r = await fetch(`/api/files?${query.toString()}`);
+        const d = await r.json();
+        if (!r.ok) {
+          this.files.error = d.error || 'Failed to load files';
+          return;
+        }
+        this.files.roots = d.roots || this.files.roots;
+        this.files.root = d.root || this.files.root;
+        this.files.currentPath = d.path || '';
+        this.files.parentPath = d.parent || '';
+        this.files.entries = d.entries || [];
+        this.files.error = '';
+        if (!preserveSelection || !this.files.entries.some(entry => entry.path === this.files.selectedPath)) {
+          this.files.selectedPath = preserveSelection ? this.files.selectedPath : '';
+        }
+      } catch {
+        this.files.error = 'Failed to load files';
+      }
+    },
+
+    async changeFileRoot(rootName) {
+      this.files.root = rootName;
+      this.files.currentPath = '';
+      this.files.parentPath = '';
+      this.files.entries = [];
+      this.files.selectedPath = '';
+      this.files.content = '';
+      this.files.dirty = false;
+      await this.loadFiles(false);
+    },
+
+    async openDirectory(path) {
+      this.files.currentPath = path || '';
+      await this.loadFiles(false);
+    },
+
+    async goUpDirectory() {
+      this.files.currentPath = this.files.parentPath || '';
+      await this.loadFiles(false);
+    },
+
+    async openFile(path) {
+      if (this.files.dirty && !confirm('Discard unsaved changes?')) return;
+      try {
+        const query = new URLSearchParams({ root: this.files.root || 'data', path });
+        const r = await fetch(`/api/files/read?${query.toString()}`);
+        const d = await r.json();
+        if (!r.ok) {
+          this.files.error = d.error || 'Failed to open file';
+          return;
+        }
+        this.files.selectedPath = d.path;
+        this.files.content = d.content || '';
+        this.files.dirty = false;
+        this.files.error = d.truncated ? 'File was truncated for editing preview.' : '';
+      } catch {
+        this.files.error = 'Failed to open file';
+      }
+    },
+
+    markFileDirty() {
+      if (this.files.selectedPath) this.files.dirty = true;
+    },
+
+    async saveFile() {
+      if (!this.files.selectedPath) return;
+      this.files.saving = true;
+      try {
+        const r = await fetch('/api/files/save', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ root: this.files.root, path: this.files.selectedPath, content: this.files.content }),
+        });
+        const d = await r.json();
+        if (!r.ok || d.ok === false) {
+          this.files.error = d.error || 'Failed to save file';
+          this.notify(this.files.error, false);
+          return;
+        }
+        this.files.dirty = false;
+        this.files.error = '';
+        this.notify('File saved', true);
+        await this.loadFiles(true);
+      } catch {
+        this.files.error = 'Failed to save file';
+        this.notify(this.files.error, false);
+      } finally {
+        this.files.saving = false;
+      }
+    },
+
+    async newFileFromPrompt() {
+      const name = prompt('New file path, relative to the current directory:');
+      if (!name) return;
+      const trimmed = name.trim();
+      if (!trimmed) return;
+      const base = this.files.currentPath ? `${this.files.currentPath.replace(/\/$/, '')}/` : '';
+      const fullPath = `${base}${trimmed}`.replace(/^\//, '');
+      if (this.files.dirty && !confirm('Discard unsaved changes?')) return;
+      this.files.selectedPath = fullPath;
+      this.files.content = '';
+      this.files.dirty = true;
+      this.files.error = '';
     },
 
     async loadPairing() {

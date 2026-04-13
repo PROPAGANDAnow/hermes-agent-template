@@ -48,6 +48,12 @@ TERMINAL_TASK_ID = "hermes-admin-terminal"
 TERMINAL_BOOT_COMMAND = os.environ.get("ADMIN_TERMINAL_COMMAND", "bash -i")
 CRON_OUTPUT_DIR = Path(HERMES_HOME) / "cron" / "output"
 MAX_CRON_OUTPUT_BYTES = 100_000
+MAX_FILE_READ_BYTES = 100_000
+FILE_BROWSER_ROOTS = {
+    "data": Path("/data"),
+    "hermes": Path(HERMES_HOME),
+    "app": Path(__file__).parent.resolve(),
+}
 
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
@@ -435,6 +441,90 @@ def _list_cron_outputs(job_id: str, limit: int = 100) -> list[dict]:
     return outputs
 
 
+def _file_browser_root(root_name: str | None) -> tuple[str, Path]:
+    root_key = (root_name or "data").strip().lower() or "data"
+    if root_key not in FILE_BROWSER_ROOTS:
+        raise ValueError("Unknown file root")
+    return root_key, FILE_BROWSER_ROOTS[root_key].resolve()
+
+
+def _resolve_browser_path(root_name: str | None, relative_path: str = "") -> tuple[str, Path, Path]:
+    root_key, root_path = _file_browser_root(root_name)
+    cleaned = (relative_path or "").strip().lstrip("/")
+    candidate = (root_path / cleaned).resolve()
+    if candidate != root_path and root_path not in candidate.parents:
+        raise ValueError("Path escapes selected root")
+    return root_key, root_path, candidate
+
+
+def _browser_relpath(root_path: Path, target_path: Path) -> str:
+    if target_path == root_path:
+        return ""
+    return str(target_path.relative_to(root_path)).replace(os.sep, "/")
+
+
+def _list_browser_entries(root_name: str | None, relative_path: str = "") -> dict:
+    root_key, root_path, current_path = _resolve_browser_path(root_name, relative_path)
+    if not current_path.exists():
+        raise FileNotFoundError("Path not found")
+    if not current_path.is_dir():
+        raise NotADirectoryError("Path is not a directory")
+    entries = []
+    for child in sorted(current_path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
+        try:
+            stat = child.stat()
+        except OSError:
+            continue
+        entries.append({
+            "name": child.name,
+            "path": _browser_relpath(root_path, child),
+            "type": "dir" if child.is_dir() else "file",
+            "size": None if child.is_dir() else stat.st_size,
+            "modified_at": stat.st_mtime,
+        })
+    parent = ""
+    if current_path != root_path:
+        parent = _browser_relpath(root_path, current_path.parent)
+    return {
+        "root": root_key,
+        "root_path": str(root_path),
+        "path": _browser_relpath(root_path, current_path),
+        "entries": entries,
+        "parent": parent,
+    }
+
+
+def _read_browser_file(root_name: str | None, relative_path: str) -> dict:
+    root_key, root_path, file_path = _resolve_browser_path(root_name, relative_path)
+    if not file_path.exists() or not file_path.is_file():
+        raise FileNotFoundError("File not found")
+    data = file_path.read_text(encoding="utf-8", errors="replace")
+    return {
+        "root": root_key,
+        "root_path": str(root_path),
+        "path": _browser_relpath(root_path, file_path),
+        "name": file_path.name,
+        "content": data[:MAX_FILE_READ_BYTES],
+        "truncated": len(data) > MAX_FILE_READ_BYTES,
+        "size": file_path.stat().st_size,
+        "modified_at": file_path.stat().st_mtime,
+    }
+
+
+def _save_browser_file(root_name: str | None, relative_path: str, content: str) -> dict:
+    root_key, root_path, file_path = _resolve_browser_path(root_name, relative_path)
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_text(content, encoding="utf-8")
+    return {
+        "root": root_key,
+        "root_path": str(root_path),
+        "path": _browser_relpath(root_path, file_path),
+        "name": file_path.name,
+        "size": file_path.stat().st_size,
+        "modified_at": file_path.stat().st_mtime,
+    }
+
+
 # ── Route handlers ────────────────────────────────────────────────────────────
 async def page_index(request: Request):
     if err := guard(request): return err
@@ -677,6 +767,53 @@ async def api_cron_remove(request: Request):
     return JSONResponse({"ok": True, "job_id": job_id})
 
 
+async def api_files_list(request: Request):
+    if err := guard(request): return err
+    root = request.query_params.get("root") or "data"
+    relpath = request.query_params.get("path") or ""
+    try:
+        payload = _list_browser_entries(root, relpath)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except FileNotFoundError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except NotADirectoryError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    payload["roots"] = {name: str(path.resolve()) for name, path in FILE_BROWSER_ROOTS.items()}
+    return JSONResponse(payload)
+
+
+async def api_files_read(request: Request):
+    if err := guard(request): return err
+    root = request.query_params.get("root") or "data"
+    relpath = request.query_params.get("path") or ""
+    try:
+        payload = _read_browser_file(root, relpath)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except FileNotFoundError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    return JSONResponse(payload)
+
+
+async def api_files_save(request: Request):
+    if err := guard(request): return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    root = body.get("root") or "data"
+    relpath = (body.get("path") or "").strip()
+    content = body.get("content") or ""
+    if not relpath:
+        return JSONResponse({"error": "path is required"}, status_code=400)
+    try:
+        payload = _save_browser_file(root, relpath, content)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return JSONResponse({"ok": True, **payload})
+
+
 async def api_gw_start(request: Request):
     if err := guard(request): return err
     asyncio.create_task(gw.start())
@@ -830,6 +967,9 @@ routes = [
     Route("/api/crons/remove",          api_cron_remove, methods=["POST"]),
     Route("/api/crons/{job_id:str}/outputs", api_cron_outputs),
     Route("/api/crons/{job_id:str}/outputs/{filename:str}", api_cron_output_get),
+    Route("/api/files",                 api_files_list),
+    Route("/api/files/read",            api_files_read),
+    Route("/api/files/save",            api_files_save, methods=["PUT"]),
     Route("/api/gateway/start",         api_gw_start,        methods=["POST"]),
     Route("/api/gateway/stop",          api_gw_stop,         methods=["POST"]),
     Route("/api/gateway/restart",       api_gw_restart,      methods=["POST"]),
