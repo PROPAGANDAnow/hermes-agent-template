@@ -119,7 +119,7 @@ def read_env(path: Path) -> dict[str, str]:
 
 
 def write_config_yaml(data: dict[str, str]) -> None:
-    """Write a minimal config.yaml so hermes picks up the model and provider."""
+    """Write config.yaml with the settings the template relies on."""
     model = data.get("LLM_MODEL", "")
     config_path = Path(HERMES_HOME) / "config.yaml"
     config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -135,6 +135,36 @@ terminal:
 
 agent:
   max_iterations: 50
+
+aux_models:
+  approval:
+    provider: "auto"
+    model: ""
+    base_url: ""
+    api_key: ""
+    timeout: 30
+
+display:
+  compact: false
+  personality: "kawaii"
+  resume_display: "full"
+  busy_input_mode: "interrupt"
+  bell_on_complete: false
+  show_reasoning: false
+  streaming: false
+  inline_diffs: true
+  show_cost: false
+  skin: "default"
+  tool_progress: "all"
+  interim_assistant_messages: true
+  tool_progress_command: false
+  tool_preview_length: 0
+  background_process_notifications: "all"
+  platforms: {{}}
+
+approvals:
+  mode: "manual"
+  timeout: 60
 
 data_dir: "{HERMES_HOME}"
 """)
