@@ -31,6 +31,8 @@ from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Route
 from starlette.templating import Jinja2Templates
 
+from cron.jobs import get_job, list_jobs, pause_job, remove_job, resume_job, trigger_job
+from cron.scheduler import tick as cron_tick
 from hermes_cli.config import load_config
 from tools.process_registry import process_registry
 from tools.terminal_tool import terminal_tool
@@ -44,6 +46,8 @@ PAIRING_DIR = Path(HERMES_HOME) / "pairing"
 PAIRING_TTL = 3600
 TERMINAL_TASK_ID = "hermes-admin-terminal"
 TERMINAL_BOOT_COMMAND = os.environ.get("ADMIN_TERMINAL_COMMAND", "bash -i")
+CRON_OUTPUT_DIR = Path(HERMES_HOME) / "cron" / "output"
+MAX_CRON_OUTPUT_BYTES = 100_000
 
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
@@ -375,6 +379,60 @@ def _terminal_status_payload(session_id: str | None = None) -> dict:
     return payload
 
 
+def _cron_job_payload(job: dict) -> dict:
+    deliver = job.get("deliver", "local")
+    if isinstance(deliver, list):
+        deliver = ", ".join(str(item) for item in deliver)
+    return {
+        "job_id": job.get("id"),
+        "name": job.get("name") or job.get("id"),
+        "prompt": job.get("prompt", ""),
+        "schedule": job.get("schedule_display") or job.get("schedule"),
+        "next_run_at": job.get("next_run_at"),
+        "last_run_at": job.get("last_run_at"),
+        "last_status": job.get("last_status"),
+        "last_error": job.get("last_error"),
+        "last_delivery_error": job.get("last_delivery_error"),
+        "enabled": job.get("enabled", True),
+        "state": job.get("state", "scheduled" if job.get("enabled", True) else "paused"),
+        "paused_at": job.get("paused_at"),
+        "paused_reason": job.get("paused_reason"),
+        "deliver": deliver,
+        "script": job.get("script"),
+    }
+
+
+def _cron_output_job_dir(job_id: str) -> Path:
+    return CRON_OUTPUT_DIR / job_id
+
+
+def _validate_output_path(job_id: str, filename: str) -> Path:
+    job_dir = _cron_output_job_dir(job_id).resolve()
+    candidate = (job_dir / filename).resolve()
+    if candidate.parent != job_dir or not candidate.is_file():
+        raise FileNotFoundError("Output file not found")
+    return candidate
+
+
+def _list_cron_outputs(job_id: str, limit: int = 100) -> list[dict]:
+    job_dir = _cron_output_job_dir(job_id)
+    if not job_dir.exists():
+        return []
+    files = sorted(job_dir.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
+    outputs = []
+    for file_path in files[:limit]:
+        try:
+            stat = file_path.stat()
+            preview = file_path.read_text(encoding="utf-8", errors="replace")[:400]
+        except Exception:
+            continue
+        outputs.append({
+            "filename": file_path.name,
+            "size": stat.st_size,
+            "modified_at": stat.st_mtime,
+            "preview": preview,
+        })
+    return outputs
 
 
 # ── Route handlers ────────────────────────────────────────────────────────────
@@ -532,6 +590,91 @@ async def api_terminal_kill(request: Request):
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
 
 
+async def api_crons(request: Request):
+    if err := guard(request): return err
+    jobs = [_cron_job_payload(job) for job in list_jobs(include_disabled=True)]
+    jobs.sort(key=lambda item: ((not item.get("enabled", True)), str(item.get("name") or ""), str(item.get("job_id") or "")))
+    return JSONResponse({"jobs": jobs, "gateway_running": gw.state == "running"})
+
+
+async def api_cron_outputs(request: Request):
+    if err := guard(request): return err
+    job_id = request.path_params["job_id"]
+    if not get_job(job_id):
+        return JSONResponse({"error": "Job not found"}, status_code=404)
+    return JSONResponse({"job_id": job_id, "outputs": _list_cron_outputs(job_id)})
+
+
+async def api_cron_output_get(request: Request):
+    if err := guard(request): return err
+    job_id = request.path_params["job_id"]
+    filename = request.path_params["filename"]
+    if not get_job(job_id):
+        return JSONResponse({"error": "Job not found"}, status_code=404)
+    try:
+        output_path = _validate_output_path(job_id, filename)
+        content = output_path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return JSONResponse({"error": "Output file not found"}, status_code=404)
+    return JSONResponse({
+        "job_id": job_id,
+        "filename": filename,
+        "content": content[:MAX_CRON_OUTPUT_BYTES],
+        "truncated": len(content) > MAX_CRON_OUTPUT_BYTES,
+    })
+
+
+async def api_cron_run(request: Request):
+    if err := guard(request): return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    job_id = (body.get("job_id") or "").strip()
+    job = trigger_job(job_id)
+    if not job:
+        return JSONResponse({"error": "Job not found"}, status_code=404)
+    await asyncio.to_thread(cron_tick, False)
+    refreshed = get_job(job_id) or job
+    return JSONResponse({"ok": True, "job": _cron_job_payload(refreshed)})
+
+
+async def api_cron_pause(request: Request):
+    if err := guard(request): return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    job_id = (body.get("job_id") or "").strip()
+    job = pause_job(job_id, reason="Paused from Hermes admin")
+    if not job:
+        return JSONResponse({"error": "Job not found"}, status_code=404)
+    return JSONResponse({"ok": True, "job": _cron_job_payload(job)})
+
+
+async def api_cron_resume(request: Request):
+    if err := guard(request): return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    job_id = (body.get("job_id") or "").strip()
+    job = resume_job(job_id)
+    if not job:
+        return JSONResponse({"error": "Job not found"}, status_code=404)
+    return JSONResponse({"ok": True, "job": _cron_job_payload(job)})
+
+
+async def api_cron_remove(request: Request):
+    if err := guard(request): return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    job_id = (body.get("job_id") or "").strip()
+    if not remove_job(job_id):
+        return JSONResponse({"error": "Job not found"}, status_code=404)
+    return JSONResponse({"ok": True, "job_id": job_id})
 
 
 async def api_gw_start(request: Request):
@@ -680,6 +823,13 @@ routes = [
     Route("/api/terminal/output",       api_terminal_output),
     Route("/api/terminal/input",        api_terminal_input, methods=["POST"]),
     Route("/api/terminal/kill",         api_terminal_kill, methods=["POST"]),
+    Route("/api/crons",                 api_crons),
+    Route("/api/crons/run",             api_cron_run, methods=["POST"]),
+    Route("/api/crons/pause",           api_cron_pause, methods=["POST"]),
+    Route("/api/crons/resume",          api_cron_resume, methods=["POST"]),
+    Route("/api/crons/remove",          api_cron_remove, methods=["POST"]),
+    Route("/api/crons/{job_id:str}/outputs", api_cron_outputs),
+    Route("/api/crons/{job_id:str}/outputs/{filename:str}", api_cron_output_get),
     Route("/api/gateway/start",         api_gw_start,        methods=["POST"]),
     Route("/api/gateway/stop",          api_gw_stop,         methods=["POST"]),
     Route("/api/gateway/restart",       api_gw_restart,      methods=["POST"]),

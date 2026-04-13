@@ -509,6 +509,26 @@
   .terminal-input-row input { font-family:var(--font-mono); }
   .terminal-meta { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
 
+  /* ── Crons ────────────────────────────────────────── */
+  .cron-layout { display:grid; grid-template-columns: 320px minmax(0, 1fr); gap:16px; min-height:0; }
+  .cron-list { display:flex; flex-direction:column; gap:10px; }
+  .cron-search { margin-bottom:12px; }
+  .cron-row {
+    border:1px solid var(--border); border-radius:8px; padding:12px 14px; background:var(--surface);
+    cursor:pointer; transition:border-color 0.15s, background 0.15s;
+  }
+  .cron-row:hover, .cron-row.active { border-color:var(--accent); background:var(--surface2); }
+  .cron-name { font-size:13px; font-weight:600; margin-bottom:6px; }
+  .cron-sub { font-size:12px; color:var(--text-dim); }
+  .cron-detail { display:flex; flex-direction:column; gap:16px; min-width:0; }
+  .cron-meta-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
+  .cron-output-list { display:flex; flex-direction:column; gap:8px; max-height:220px; overflow:auto; }
+  .cron-output-row { border:1px solid var(--border); border-radius:8px; padding:10px 12px; cursor:pointer; background:var(--surface); }
+  .cron-output-row:hover, .cron-output-row.active { border-color:var(--accent); background:var(--surface2); }
+  .cron-output-view {
+    min-height:240px; max-height:420px; overflow:auto; background:#0a0c10; border:1px solid var(--border); border-radius:8px;
+    padding:14px 16px; font-family:var(--font-mono); font-size:12px; line-height:1.55; white-space:pre-wrap; word-break:break-word;
+  }
 </style>
 </head>
 <body x-data="app()" x-init="init()" x-cloak>
@@ -564,6 +584,13 @@
       <span>Users</span>
       <span class="nav-badge" :class="{visible: pendingCount>0}" x-text="pendingCount"></span>
     </div>
+    <div class="nav-item"
+         :class="{active: page==='crons', locked: !isSetupDone}"
+         @click="isSetupDone && (page='crons', loadCrons())">
+      <span class="nav-icon">⏲</span>
+      <span>Crons</span>
+    </div>
+
     <div class="nav-divider" style="margin-top:auto;"></div>
 
     <div class="nav-item danger" @click="resetConfig()">
@@ -884,6 +911,106 @@
       </div>
     </div>
 
+    <!-- ── Crons panel ─────────────────────────────── -->
+    <div class="panel" :class="{active: page==='crons'}">
+      <div class="panel-header">
+        <div class="panel-title">Crons</div>
+        <div class="panel-subtitle" x-text="filteredCronJobs.length + ' jobs'"></div>
+      </div>
+      <div class="panel-body">
+        <div class="card" x-show="!cronGatewayRunning" style="margin-bottom:16px;border-color:var(--yellow);">
+          <div style="font-size:13px;font-weight:500;color:var(--yellow);">Gateway is not running</div>
+          <div class="hint">Scheduled jobs will not fire automatically until the Hermes gateway is running.</div>
+        </div>
+
+        <div class="cron-layout">
+          <div>
+            <div class="card">
+              <label class="field-label">Search Jobs</label>
+              <input class="cron-search" type="text" x-model="cronSearch" placeholder="Filter by name, id, schedule, or delivery">
+              <div class="cron-list">
+                <template x-for="job in filteredCronJobs" :key="job.job_id">
+                  <div class="cron-row" :class="{active: cronSelectedId===job.job_id}" @click="selectCron(job.job_id)">
+                    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+                      <div class="cron-name" x-text="job.name || job.job_id"></div>
+                      <span class="chip" :class="job.enabled ? 'green' : 'dim'" x-text="job.enabled ? 'enabled' : 'paused'"></span>
+                    </div>
+                    <div class="cron-sub" x-text="job.schedule || 'no schedule'"></div>
+                    <div class="cron-sub" style="margin-top:6px;" x-text="(job.last_status || 'never run') + (job.last_run_at ? ' · ' + fmtIso(job.last_run_at) : '')"></div>
+                  </div>
+                </template>
+                <div class="empty-state" x-show="filteredCronJobs.length===0">No cron jobs found.</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="cron-detail">
+            <template x-if="selectedCronJob">
+              <div class="cron-detail">
+                <div class="card">
+                  <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">
+                    <div>
+                      <div class="section-label" style="margin-bottom:6px;">Selected Job</div>
+                      <div style="font-size:18px;font-weight:600;" x-text="selectedCronJob.name || selectedCronJob.job_id"></div>
+                      <div class="hint" x-text="selectedCronJob.job_id"></div>
+                    </div>
+                    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                      <button class="btn success" @click="runCron(selectedCronJob.job_id)">Run Now</button>
+                      <button class="btn" x-show="selectedCronJob.enabled" @click="pauseCron(selectedCronJob.job_id)">Pause</button>
+                      <button class="btn" x-show="!selectedCronJob.enabled" @click="resumeCron(selectedCronJob.job_id)">Resume</button>
+                      <button class="btn danger" @click="removeCron(selectedCronJob.job_id)">Remove</button>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="cron-meta-grid">
+                  <div class="card"><div class="field-label">Schedule</div><div x-text="selectedCronJob.schedule || '—'"></div></div>
+                  <div class="card"><div class="field-label">Delivery</div><div x-text="selectedCronJob.deliver || 'local'"></div></div>
+                  <div class="card"><div class="field-label">Next Run</div><div x-text="fmtIso(selectedCronJob.next_run_at)"></div></div>
+                  <div class="card"><div class="field-label">Last Run</div><div x-text="fmtIso(selectedCronJob.last_run_at)"></div></div>
+                  <div class="card"><div class="field-label">State</div><div><span class="chip" :class="selectedCronJob.enabled ? 'green' : 'yellow'" x-text="selectedCronJob.state || (selectedCronJob.enabled ? 'scheduled' : 'paused')"></span></div></div>
+                  <div class="card"><div class="field-label">Last Status</div><div x-text="selectedCronJob.last_status || 'never run'"></div></div>
+                </div>
+
+                <div class="card" x-show="selectedCronJob.prompt">
+                  <div class="field-label">Prompt</div>
+                  <div class="cron-output-view" style="min-height:120px;max-height:200px;" x-text="selectedCronJob.prompt"></div>
+                </div>
+
+                <div class="card">
+                  <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px;">
+                    <div class="section-label" style="margin:0;">Execution Logs</div>
+                    <button class="btn sm" @click="loadCronOutputs()" :disabled="!cronSelectedId">Refresh Logs</button>
+                  </div>
+                  <div class="cron-output-list">
+                    <template x-for="output in cronOutputs" :key="output.filename">
+                      <div class="cron-output-row" :class="{active: cronSelectedOutput===output.filename}" @click="loadCronOutputFile(output.filename)">
+                        <div style="display:flex;justify-content:space-between;gap:10px;">
+                          <div style="font-weight:500;" x-text="output.filename"></div>
+                          <div class="hint" x-text="fmtTimestamp(output.modified_at)"></div>
+                        </div>
+                        <div class="hint" x-text="(output.preview || '').slice(0, 140)"></div>
+                      </div>
+                    </template>
+                    <div class="empty-state" x-show="cronOutputs.length===0">No saved cron outputs yet.</div>
+                  </div>
+                </div>
+
+                <div class="card">
+                  <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px;">
+                    <div class="section-label" style="margin:0;">Selected Log</div>
+                    <button class="btn sm" @click="copyCronOutput()" :disabled="!cronOutputContent">Copy</button>
+                  </div>
+                  <div class="cron-output-view" x-text="cronOutputContent || 'Select an execution log to inspect its saved output.'"></div>
+                </div>
+              </div>
+            </template>
+            <div class="empty-state" x-show="!selectedCronJob">Select a cron job to inspect its schedule and execution logs.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- ── Users panel ─────────────────────────────── -->
     <div class="panel" :class="{active: page==='users'}">
       <div class="panel-header">
@@ -984,6 +1111,13 @@ function app() {
       error: '',
       exitCode: null,
     },
+    cronJobs: [],
+    cronGatewayRunning: false,
+    cronSelectedId: '',
+    cronOutputs: [],
+    cronSelectedOutput: '',
+    cronOutputContent: '',
+    cronSearch: '',
 
     tools,
 
@@ -1007,6 +1141,20 @@ function app() {
     toolsEnabled: Object.fromEntries(tools.map(t => [t.key, false])),
 
     get pendingCount() { return this.pending.length; },
+
+    get filteredCronJobs() {
+      const query = (this.cronSearch || '').trim().toLowerCase();
+      if (!query) return this.cronJobs;
+      return this.cronJobs.filter(job =>
+        [job.name, job.job_id, job.schedule, job.deliver, job.last_status]
+          .filter(Boolean)
+          .some(value => String(value).toLowerCase().includes(query))
+      );
+    },
+
+    get selectedCronJob() {
+      return this.cronJobs.find(job => job.job_id === this.cronSelectedId) || null;
+    },
 
     get isSetupDone() {
       const keys = Object.values(this.providerMap).map(p => p.key);
@@ -1045,12 +1193,14 @@ function app() {
         this.loadLogs(),
         this.loadPairing(),
         this.loadTerminalStatus(),
+        this.loadCrons(),
       ]);
       setInterval(() => this.loadStatus(),  5000);
       setInterval(() => this.loadLogs(),    3000);
       setInterval(() => this.loadPairing(), 5000);
       setInterval(() => { if (this.page === 'terminal') this.loadTerminalStatus(); }, 2500);
       setInterval(() => { if (this.page === 'terminal') this.pollTerminalOutput(); }, 1200);
+      setInterval(() => { if (this.page === 'crons') this.loadCrons(false); }, 10000);
     },
 
     async loadConfig() {
@@ -1250,6 +1400,143 @@ function app() {
       }
     },
 
+    async loadCrons(preserveSelection = true) {
+      try {
+        const r = await fetch('/api/crons');
+        if (!r.ok) return;
+        const d = await r.json();
+        this.cronJobs = d.jobs || [];
+        this.cronGatewayRunning = !!d.gateway_running;
+        if (!preserveSelection || !this.cronJobs.some(job => job.job_id === this.cronSelectedId)) {
+          this.cronSelectedId = this.cronJobs[0]?.job_id || '';
+          this.cronSelectedOutput = '';
+          this.cronOutputContent = '';
+        }
+        if (this.cronSelectedId && this.page === 'crons') await this.loadCronOutputs(this.cronSelectedId);
+      } catch {}
+    },
+
+    async selectCron(jobId) {
+      this.cronSelectedId = jobId;
+      this.cronSelectedOutput = '';
+      this.cronOutputContent = '';
+      await this.loadCronOutputs(jobId);
+    },
+
+    async loadCronOutputs(jobId = this.cronSelectedId) {
+      if (!jobId) {
+        this.cronOutputs = [];
+        return;
+      }
+      try {
+        const r = await fetch(`/api/crons/${encodeURIComponent(jobId)}/outputs`);
+        if (!r.ok) return;
+        const d = await r.json();
+        this.cronOutputs = d.outputs || [];
+        if (this.cronSelectedOutput && !this.cronOutputs.some(item => item.filename === this.cronSelectedOutput)) {
+          this.cronSelectedOutput = '';
+          this.cronOutputContent = '';
+        }
+      } catch {}
+    },
+
+    async loadCronOutputFile(filename) {
+      if (!this.cronSelectedId || !filename) return;
+      try {
+        const r = await fetch(`/api/crons/${encodeURIComponent(this.cronSelectedId)}/outputs/${encodeURIComponent(filename)}`);
+        const d = await r.json();
+        if (!r.ok) {
+          this.notify(d.error || 'Failed to load cron output', false);
+          return;
+        }
+        this.cronSelectedOutput = filename;
+        this.cronOutputContent = d.content || '';
+      } catch {
+        this.notify('Failed to load cron output', false);
+      }
+    },
+
+    async runCron(jobId) {
+      try {
+        const r = await fetch('/api/crons/run', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ job_id: jobId }),
+        });
+        const d = await r.json();
+        if (!r.ok) return this.notify(d.error || 'Failed to run cron job', false);
+        this.notify('Cron job triggered', true);
+        await this.loadCrons();
+        setTimeout(() => this.loadCronOutputs(jobId), 500);
+      } catch {
+        this.notify('Failed to run cron job', false);
+      }
+    },
+
+    async pauseCron(jobId) {
+      try {
+        const r = await fetch('/api/crons/pause', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ job_id: jobId }),
+        });
+        const d = await r.json();
+        if (!r.ok) return this.notify(d.error || 'Failed to pause cron job', false);
+        this.notify('Cron job paused', true);
+        await this.loadCrons();
+      } catch {
+        this.notify('Failed to pause cron job', false);
+      }
+    },
+
+    async resumeCron(jobId) {
+      try {
+        const r = await fetch('/api/crons/resume', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ job_id: jobId }),
+        });
+        const d = await r.json();
+        if (!r.ok) return this.notify(d.error || 'Failed to resume cron job', false);
+        this.notify('Cron job resumed', true);
+        await this.loadCrons();
+      } catch {
+        this.notify('Failed to resume cron job', false);
+      }
+    },
+
+    async removeCron(jobId) {
+      if (!confirm('Remove this cron job?')) return;
+      try {
+        const r = await fetch('/api/crons/remove', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ job_id: jobId }),
+        });
+        const d = await r.json();
+        if (!r.ok) return this.notify(d.error || 'Failed to remove cron job', false);
+        this.notify('Cron job removed', true);
+        if (this.cronSelectedId === jobId) {
+          this.cronSelectedId = '';
+          this.cronSelectedOutput = '';
+          this.cronOutputContent = '';
+        }
+        await this.loadCrons(false);
+      } catch {
+        this.notify('Failed to remove cron job', false);
+      }
+    },
+
+    async copyCronOutput() {
+      if (!this.cronOutputContent) return;
+      try {
+        await navigator.clipboard.writeText(this.cronOutputContent);
+        this.notify('Cron output copied', true);
+      } catch {
+        this.notify('Clipboard copy failed', false);
+      }
+    },
+
     async loadPairing() {
       try {
         const [pr, ar] = await Promise.all([fetch('/api/pairing/pending'), fetch('/api/pairing/approved')]);
@@ -1285,6 +1572,12 @@ function app() {
       if (!value) return '—';
       const date = new Date(value);
       if (Number.isNaN(date.getTime())) return String(value);
+      return date.toLocaleString(undefined, { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' });
+    },
+    fmtTimestamp(value) {
+      if (!value) return '—';
+      const date = new Date(value * 1000);
+      if (Number.isNaN(date.getTime())) return '—';
       return date.toLocaleString(undefined, { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' });
     },
     fmtUptime(s) {
