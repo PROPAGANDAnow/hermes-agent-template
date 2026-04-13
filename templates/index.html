@@ -493,6 +493,22 @@
   .hint { font-size: 12px; color: var(--text-dim); margin-top: 6px; }
   code { font-family: var(--font-mono); color: var(--accent); }
   .field-gap { margin-top: 12px; }
+
+  .chip.yellow { background: rgba(210,153,34,0.16); color: var(--yellow); }
+  .chip.red    { background: rgba(248,81,73,0.16);  color: var(--red); }
+  .chip.blue   { background: rgba(98,114,255,0.16); color: var(--accent2); }
+
+  /* ── Terminal ─────────────────────────────────────── */
+  .terminal-shell { display:flex; flex-direction:column; gap:12px; height:100%; }
+  .terminal-toolbar { display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
+  .terminal-console {
+    flex:1; min-height:360px; overflow:auto; background:#0a0c10; border:1px solid var(--border);
+    border-radius:8px; padding:14px 16px; font-family:var(--font-mono); font-size:12px; line-height:1.55; white-space:pre-wrap;
+  }
+  .terminal-input-row { display:flex; gap:10px; align-items:center; }
+  .terminal-input-row input { font-family:var(--font-mono); }
+  .terminal-meta { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+
 </style>
 </head>
 <body x-data="app()" x-init="init()" x-cloak>
@@ -533,6 +549,12 @@
       <span class="nav-icon">≡</span>
       <span>Logs</span>
     </div>
+    <div class="nav-item"
+         :class="{active: page==='terminal', locked: !isSetupDone}"
+         @click="isSetupDone && (page='terminal', loadTerminalStatus(), pollTerminalOutput())">
+      <span class="nav-icon">⌘</span>
+      <span>Terminal</span>
+    </div>
 
     <div class="nav-group-label" style="margin-top:8px">Manage</div>
     <div class="nav-item"
@@ -542,7 +564,6 @@
       <span>Users</span>
       <span class="nav-badge" :class="{visible: pendingCount>0}" x-text="pendingCount"></span>
     </div>
-
     <div class="nav-divider" style="margin-top:auto;"></div>
 
     <div class="nav-item danger" @click="resetConfig()">
@@ -820,6 +841,49 @@
       </div>
     </div>
 
+    <!-- ── Terminal panel ──────────────────────────── -->
+    <div class="panel" :class="{active: page==='terminal'}">
+      <div class="panel-header">
+        <div class="panel-title">Terminal</div>
+        <div class="panel-subtitle" x-text="terminal.sessionId ? (terminal.status || 'idle') : 'no active session'"></div>
+      </div>
+      <div class="panel-body">
+        <div class="terminal-shell">
+          <div class="terminal-meta">
+            <span class="chip blue" x-text="'backend: ' + (terminal.backend || 'local')"></span>
+            <span class="chip" :class="terminal.interactiveSupported ? 'green' : 'red'" x-text="terminal.interactiveSupported ? 'interactive' : 'unsupported'"></span>
+            <span class="chip" :class="terminal.status==='running' ? 'green' : (terminal.status==='exited' ? 'yellow' : 'dim')" x-text="terminal.status || 'idle'"></span>
+            <span class="chip dim" x-show="terminal.sessionId" x-text="terminal.sessionId"></span>
+          </div>
+
+          <div class="card">
+            <label class="field-label">Startup Command</label>
+            <div class="terminal-input-row">
+              <input type="text" x-model="terminal.command" placeholder="bash -i">
+              <button class="btn success" @click="newTerminalSession()">New Session</button>
+              <button class="btn danger" @click="killTerminalSession()" :disabled="!terminal.sessionId">Kill</button>
+              <button class="btn" @click="copyTerminalOutput()" :disabled="!terminal.output">Copy Output</button>
+              <button class="btn" @click="clearTerminalView()" :disabled="!terminal.output">Clear View</button>
+            </div>
+            <p class="hint" x-show="!terminal.interactiveSupported">Interactive terminal sessions require Hermes terminal.backend=local.</p>
+            <p class="hint" x-show="terminal.error" x-text="terminal.error"></p>
+          </div>
+
+          <div class="terminal-console" x-ref="terminalbox" x-text="terminal.output || 'No terminal output yet. Start a new session to open an interactive shell.'"></div>
+
+          <div class="card">
+            <label class="field-label">Send Input</label>
+            <div class="terminal-input-row">
+              <input type="text" x-model="terminal.input" :disabled="!terminal.sessionId || terminal.status!=='running'"
+                     @keydown.enter.prevent="sendTerminalInput()"
+                     placeholder="Type a shell command and press Enter">
+              <button class="btn primary" @click="sendTerminalInput()" :disabled="!terminal.input || !terminal.sessionId || terminal.status!=='running'">Send</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- ── Users panel ─────────────────────────────── -->
     <div class="panel" :class="{active: page==='users'}">
       <div class="panel-header">
@@ -909,6 +973,17 @@ function app() {
     approved: [],
     saving: false,
     restartOnSave: true,
+    terminal: {
+      backend: 'local',
+      interactiveSupported: false,
+      sessionId: '',
+      status: 'idle',
+      command: 'bash -i',
+      input: '',
+      output: '',
+      error: '',
+      exitCode: null,
+    },
 
     tools,
 
@@ -964,10 +1039,18 @@ function app() {
     },
 
     async init() {
-      await Promise.all([this.loadConfig(), this.loadStatus(), this.loadLogs(), this.loadPairing()]);
+      await Promise.all([
+        this.loadConfig(),
+        this.loadStatus(),
+        this.loadLogs(),
+        this.loadPairing(),
+        this.loadTerminalStatus(),
+      ]);
       setInterval(() => this.loadStatus(),  5000);
       setInterval(() => this.loadLogs(),    3000);
       setInterval(() => this.loadPairing(), 5000);
+      setInterval(() => { if (this.page === 'terminal') this.loadTerminalStatus(); }, 2500);
+      setInterval(() => { if (this.page === 'terminal') this.pollTerminalOutput(); }, 1200);
     },
 
     async loadConfig() {
@@ -1045,6 +1128,128 @@ function app() {
       } catch {}
     },
 
+    async loadTerminalStatus() {
+      try {
+        const r = await fetch('/api/terminal/status');
+        const d = await r.json();
+        this.terminal.backend = d.backend || 'local';
+        this.terminal.interactiveSupported = !!d.interactive_supported;
+        if (!this.terminal.command) this.terminal.command = d.boot_command || 'bash -i';
+        if (d.session) {
+          this.terminal.sessionId = d.session.session_id || '';
+          this.terminal.status = d.session.status || 'idle';
+          this.terminal.exitCode = d.session.exit_code ?? null;
+        } else {
+          this.terminal.sessionId = '';
+          this.terminal.status = 'idle';
+          this.terminal.exitCode = null;
+        }
+        if (!this.terminal.interactiveSupported && !this.terminal.error) {
+          this.terminal.error = 'Interactive terminal sessions require terminal.backend=local.';
+        }
+      } catch (e) {
+        this.terminal.error = 'Failed to load terminal status';
+      }
+    },
+
+    async newTerminalSession() {
+      this.terminal.error = '';
+      try {
+        const r = await fetch('/api/terminal/session', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ command: this.terminal.command || 'bash -i' }),
+        });
+        const d = await r.json();
+        if (!r.ok || d.ok === false) {
+          this.terminal.error = d.error || 'Failed to start terminal session';
+          this.notify(this.terminal.error, false);
+          return;
+        }
+        this.terminal.sessionId = d.session_id || d.session?.session_id || '';
+        this.terminal.status = d.session?.status || 'running';
+        this.terminal.output = '';
+        this.notify('Terminal session started', true);
+        await this.pollTerminalOutput();
+      } catch (e) {
+        this.terminal.error = 'Failed to start terminal session';
+        this.notify(this.terminal.error, false);
+      }
+    },
+
+    async pollTerminalOutput() {
+      if (!this.terminal.sessionId) return;
+      try {
+        const r = await fetch(`/api/terminal/output?session_id=${encodeURIComponent(this.terminal.sessionId)}&offset=0`);
+        const d = await r.json();
+        if (!r.ok || d.ok === false) {
+          if (d.error) this.terminal.error = d.error;
+          return;
+        }
+        const box = this.$refs.terminalbox;
+        const atBottom = box && (box.scrollTop + box.clientHeight >= box.scrollHeight - 40);
+        this.terminal.output = d.output || '';
+        this.terminal.status = d.session?.status || this.terminal.status;
+        this.terminal.exitCode = d.session?.exit_code ?? this.terminal.exitCode;
+        if (atBottom && box) this.$nextTick(() => { box.scrollTop = box.scrollHeight; });
+      } catch {}
+    },
+
+    async sendTerminalInput() {
+      if (!this.terminal.input || !this.terminal.sessionId) return;
+      const payload = { session_id: this.terminal.sessionId, data: this.terminal.input, submit: true };
+      const sentValue = this.terminal.input;
+      this.terminal.input = '';
+      try {
+        const r = await fetch('/api/terminal/input', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok || d.ok === false) {
+          this.terminal.input = sentValue;
+          this.notify(d.error || 'Failed to send input', false);
+          return;
+        }
+        setTimeout(() => this.pollTerminalOutput(), 200);
+      } catch (e) {
+        this.terminal.input = sentValue;
+        this.notify('Failed to send input', false);
+      }
+    },
+
+    async killTerminalSession() {
+      if (!this.terminal.sessionId) return;
+      const sessionId = this.terminal.sessionId;
+      try {
+        await fetch('/api/terminal/kill', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: sessionId }),
+        });
+        this.terminal.sessionId = '';
+        this.terminal.status = 'idle';
+        this.notify('Terminal session killed', true);
+      } catch (e) {
+        this.notify('Failed to kill terminal session', false);
+      }
+    },
+
+    clearTerminalView() {
+      this.terminal.output = '';
+    },
+
+    async copyTerminalOutput() {
+      if (!this.terminal.output) return;
+      try {
+        await navigator.clipboard.writeText(this.terminal.output);
+        this.notify('Terminal output copied', true);
+      } catch {
+        this.notify('Clipboard copy failed', false);
+      }
+    },
+
     async loadPairing() {
       try {
         const [pr, ar] = await Promise.all([fetch('/api/pairing/pending'), fetch('/api/pairing/approved')]);
@@ -1075,6 +1280,12 @@ function app() {
     fmtDate(ts) {
       if (!ts) return '—';
       return new Date(ts*1000).toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
+    },
+    fmtIso(value) {
+      if (!value) return '—';
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return String(value);
+      return date.toLocaleString(undefined, { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' });
     },
     fmtUptime(s) {
       if (s==null) return '';

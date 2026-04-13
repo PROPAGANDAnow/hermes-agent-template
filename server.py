@@ -31,6 +31,10 @@ from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Route
 from starlette.templating import Jinja2Templates
 
+from hermes_cli.config import load_config
+from tools.process_registry import process_registry
+from tools.terminal_tool import terminal_tool
+
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
@@ -38,6 +42,8 @@ HERMES_HOME = os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))
 ENV_FILE = Path(HERMES_HOME) / ".env"
 PAIRING_DIR = Path(HERMES_HOME) / "pairing"
 PAIRING_TTL = 3600
+TERMINAL_TASK_ID = "hermes-admin-terminal"
+TERMINAL_BOOT_COMMAND = os.environ.get("ADMIN_TERMINAL_COMMAND", "bash -i")
 
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
@@ -324,6 +330,53 @@ gw = Gateway()
 cfg_lock = asyncio.Lock()
 
 
+def _terminal_backend() -> str:
+    backend = os.environ.get("TERMINAL_ENV", "").strip()
+    if backend:
+        return backend
+    try:
+        config = load_config()
+        return (((config or {}).get("terminal") or {}).get("backend") or "local")
+    except Exception:
+        return "local"
+
+
+def _terminal_supported() -> bool:
+    return _terminal_backend() == "local"
+
+
+def _terminal_sessions() -> list[dict]:
+    sessions = process_registry.list_sessions(task_id=TERMINAL_TASK_ID)
+    sessions.sort(key=lambda item: (item.get("status") != "running", item.get("started_at", "")))
+    return sessions
+
+
+def _active_terminal_session_id() -> str | None:
+    sessions = _terminal_sessions()
+    if not sessions:
+        return None
+    return sessions[0].get("session_id")
+
+
+def _terminal_status_payload(session_id: str | None = None) -> dict:
+    session_id = session_id or _active_terminal_session_id()
+    payload = {
+        "backend": _terminal_backend(),
+        "interactive_supported": _terminal_supported(),
+        "boot_command": TERMINAL_BOOT_COMMAND,
+        "session": None,
+    }
+    if not session_id:
+        return payload
+    try:
+        payload["session"] = process_registry.poll(session_id)
+    except Exception as e:
+        payload["session"] = {"session_id": session_id, "status": "missing", "error": str(e)}
+    return payload
+
+
+
+
 # ── Route handlers ────────────────────────────────────────────────────────────
 async def page_index(request: Request):
     if err := guard(request): return err
@@ -384,6 +437,101 @@ async def api_status(request: Request):
 async def api_logs(request: Request):
     if err := guard(request): return err
     return JSONResponse({"lines": list(gw.logs)})
+
+
+async def api_terminal_status(request: Request):
+    if err := guard(request): return err
+    session_id = request.query_params.get("session_id") or None
+    return JSONResponse(_terminal_status_payload(session_id))
+
+
+async def api_terminal_session(request: Request):
+    if err := guard(request): return err
+    if not _terminal_supported():
+        return JSONResponse({
+            "ok": False,
+            "error": f"Interactive terminal requires terminal.backend=local (current: {_terminal_backend()})",
+            "backend": _terminal_backend(),
+        }, status_code=400)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    command = (body.get("command") or TERMINAL_BOOT_COMMAND).strip() or TERMINAL_BOOT_COMMAND
+    existing = _active_terminal_session_id()
+    if existing:
+        try:
+            process_registry.kill_process(existing)
+        except Exception:
+            pass
+    try:
+        result = json.loads(terminal_tool(command, background=True, task_id=TERMINAL_TASK_ID, pty=True))
+        payload = _terminal_status_payload(result.get("session_id"))
+        payload.update({"ok": True, **result})
+        return JSONResponse(payload)
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
+async def api_terminal_output(request: Request):
+    if err := guard(request): return err
+    session_id = request.query_params.get("session_id") or _active_terminal_session_id()
+    if not session_id:
+        return JSONResponse({"ok": True, "session": None, "output": "", "lines": [], "next_offset": 0})
+    try:
+        offset = int(request.query_params.get("offset", "0"))
+    except ValueError:
+        offset = 0
+    try:
+        log_data = process_registry.read_log(session_id, offset=offset, limit=500)
+        status = process_registry.poll(session_id)
+        output = ANSI_ESCAPE.sub("", log_data.get("output", ""))
+        return JSONResponse({
+            "ok": True,
+            "session": status,
+            "output": output,
+            "lines": output.splitlines(),
+            "next_offset": log_data.get("total_lines", offset),
+            "showing": log_data.get("showing"),
+        })
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=404)
+
+
+async def api_terminal_input(request: Request):
+    if err := guard(request): return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    session_id = body.get("session_id") or _active_terminal_session_id()
+    if not session_id:
+        return JSONResponse({"error": "No active terminal session"}, status_code=404)
+    data = body.get("data", "")
+    submit = body.get("submit", True)
+    try:
+        result = process_registry.submit_stdin(session_id, data) if submit else process_registry.write_stdin(session_id, data)
+        return JSONResponse({"ok": True, **result})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+
+async def api_terminal_kill(request: Request):
+    if err := guard(request): return err
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    session_id = body.get("session_id") or _active_terminal_session_id()
+    if not session_id:
+        return JSONResponse({"ok": True, "status": "no_session"})
+    try:
+        result = process_registry.kill_process(session_id)
+        return JSONResponse({"ok": True, **result})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+
 
 
 async def api_gw_start(request: Request):
@@ -527,6 +675,11 @@ routes = [
     Route("/api/config",                api_config_put,      methods=["PUT"]),
     Route("/api/status",                api_status),
     Route("/api/logs",                  api_logs),
+    Route("/api/terminal/status",       api_terminal_status),
+    Route("/api/terminal/session",      api_terminal_session, methods=["POST"]),
+    Route("/api/terminal/output",       api_terminal_output),
+    Route("/api/terminal/input",        api_terminal_input, methods=["POST"]),
+    Route("/api/terminal/kill",         api_terminal_kill, methods=["POST"]),
     Route("/api/gateway/start",         api_gw_start,        methods=["POST"]),
     Route("/api/gateway/stop",          api_gw_stop,         methods=["POST"]),
     Route("/api/gateway/restart",       api_gw_restart,      methods=["POST"]),
