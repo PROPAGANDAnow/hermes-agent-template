@@ -11,6 +11,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import signal
 import time
 from collections import deque
@@ -41,8 +42,15 @@ ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 HERMES_HOME = os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))
+PAPERCLIP_HOME = os.environ.get("PAPERCLIP_HOME", "/data/.paperclip")
+PAPERCLIP_WORKSPACE = os.environ.get("PAPERCLIP_WORKSPACE", "/data/workspaces/paperclip")
 ENV_FILE = Path(HERMES_HOME) / ".env"
 PAIRING_DIR = Path(HERMES_HOME) / "pairing"
+WORKSPACES_DIR = Path(HERMES_HOME) / "workspaces"
+WORKSPACE_NAMES = ("default", "projects", "scratch", "shared")
+WORKSPACE_METADATA_FILE = WORKSPACES_DIR / ".bootstrap.json"
+PAPERCLIP_HOME_DIR = Path(PAPERCLIP_HOME)
+PAPERCLIP_WORKSPACE_DIR = Path(PAPERCLIP_WORKSPACE)
 PAIRING_TTL = 3600
 TERMINAL_TASK_ID = "hermes-admin-terminal"
 TERMINAL_BOOT_COMMAND = os.environ.get("ADMIN_TERMINAL_COMMAND", "bash -i")
@@ -52,6 +60,7 @@ MAX_FILE_READ_BYTES = 100_000
 FILE_BROWSER_ROOTS = {
     "data": Path("/data"),
     "hermes": Path(HERMES_HOME),
+    "paperclip": PAPERCLIP_HOME_DIR,
     "app": Path(__file__).parent.resolve(),
 }
 
@@ -137,6 +146,7 @@ def read_env(path: Path) -> dict[str, str]:
 def write_config_yaml(data: dict[str, str]) -> None:
     """Write config.yaml with the settings the template relies on."""
     model = data.get("LLM_MODEL", "")
+    workspace_state = ensure_workspace_layout()
     config_path = Path(HERMES_HOME) / "config.yaml"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(f"""\
@@ -147,7 +157,7 @@ model:
 terminal:
   backend: "local"
   timeout: 60
-  cwd: "/tmp"
+  cwd: "{workspace_state['default_cwd']}"
 
 agent:
   max_iterations: 50
@@ -186,6 +196,65 @@ data_dir: "{HERMES_HOME}"
 """)
 
 
+def ensure_workspace_layout() -> dict:
+    """Create and describe the persistent wrapper-managed workspace layout."""
+    WORKSPACES_DIR.mkdir(parents=True, exist_ok=True)
+    workspaces: dict[str, dict[str, str | bool]] = {}
+    for name in WORKSPACE_NAMES:
+        path = WORKSPACES_DIR / name
+        path.mkdir(parents=True, exist_ok=True)
+        workspaces[name] = {
+            "path": str(path),
+            "exists": path.is_dir(),
+        }
+
+    state = {
+        "root": str(WORKSPACES_DIR),
+        "default_cwd": str(WORKSPACES_DIR / "default"),
+        "ready": all(item["exists"] for item in workspaces.values()),
+        "managed_by": "hermes-wrapper",
+        "metadata_path": str(WORKSPACE_METADATA_FILE),
+        "workspaces": workspaces,
+    }
+    WORKSPACE_METADATA_FILE.write_text(json.dumps(state, indent=2, sort_keys=True))
+    return state
+
+
+def ensure_paperclip_layout() -> dict:
+    """Create and describe the persistent Paperclip runtime layout bundled with the template."""
+    PAPERCLIP_HOME_DIR.mkdir(parents=True, exist_ok=True)
+    (PAPERCLIP_HOME_DIR / "logs").mkdir(parents=True, exist_ok=True)
+    (PAPERCLIP_HOME_DIR / "storage").mkdir(parents=True, exist_ok=True)
+    PAPERCLIP_WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
+    binary_path = shutil.which("paperclipai")
+    return {
+        "installed": bool(binary_path),
+        "binary_path": binary_path or "",
+        "home": str(PAPERCLIP_HOME_DIR),
+        "workspace": str(PAPERCLIP_WORKSPACE_DIR),
+        "onboard_command": "paperclipai onboard --yes",
+        "run_command": "paperclipai run",
+    }
+
+
+def channel_is_configured(key: str, value: str) -> bool:
+    if key == "WHATSAPP_ENABLED":
+        return value.lower() not in ("", "false", "0", "no")
+    return bool(value)
+
+
+def setup_checklist(data: dict[str, str] | None = None) -> dict[str, bool]:
+    if data is None:
+        data = read_env(ENV_FILE)
+    workspace_state = ensure_workspace_layout()
+    return {
+        "workspace_layout": workspace_state["ready"],
+        "model_configured": bool(data.get("LLM_MODEL")),
+        "provider_configured": any(data.get(k) for k in PROVIDER_KEYS),
+        "channel_configured": any(channel_is_configured(key, data.get(key, "")) for key in CHANNEL_MAP.values()),
+    }
+
+
 def write_env(path: Path, data: dict[str, str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     cat_order = ["model", "provider", "tool",
@@ -220,6 +289,14 @@ def write_env(path: Path, data: dict[str, str]) -> None:
         lines.append("")
 
     path.write_text("\n".join(lines))
+
+
+def is_config_complete(data: dict[str, str] | None = None) -> bool:
+    """Single source of truth for 'ready to run the gateway'."""
+    if data is None:
+        data = read_env(ENV_FILE)
+    checklist = setup_checklist(data)
+    return all(checklist.values())
 
 
 def mask(data: dict[str, str]) -> dict[str, str]:
@@ -540,7 +617,16 @@ async def api_config_get(request: Request):
     async with cfg_lock:
         data = read_env(ENV_FILE)
     defs = [{"key": k, "label": l, "category": c, "secret": s} for k, l, c, s in ENV_VARS]
-    return JSONResponse({"vars": mask(data), "defs": defs})
+    return JSONResponse({
+        "vars": mask(data),
+        "defs": defs,
+        "setup": {
+            "ready": is_config_complete(data),
+            "checklist": setup_checklist(data),
+        },
+        "workspaces": ensure_workspace_layout(),
+        "paperclip": ensure_paperclip_layout(),
+    })
 
 
 async def api_config_put(request: Request):
@@ -570,16 +656,29 @@ async def api_config_put(request: Request):
 async def api_status(request: Request):
     if err := guard(request): return err
     data = read_env(ENV_FILE)
+    workspace_state = ensure_workspace_layout()
+    paperclip_state = ensure_paperclip_layout()
     providers = {
         k.replace("_API_KEY","").replace("_TOKEN","").replace("HF_","HuggingFace ").replace("_"," ").title():
         {"configured": bool(data.get(k))}
         for k in PROVIDER_KEYS
     }
     channels = {
-        name: {"configured": bool(v := data.get(key,"")) and v.lower() not in ("false","0","no")}
+        name: {"configured": channel_is_configured(key, data.get(key, ""))}
         for name, key in CHANNEL_MAP.items()
     }
-    return JSONResponse({"gateway": gw.status(), "providers": providers, "channels": channels})
+    checklist = setup_checklist(data)
+    return JSONResponse({
+        "gateway": gw.status(),
+        "providers": providers,
+        "channels": channels,
+        "setup": {
+            "ready": all(checklist.values()),
+            "checklist": checklist,
+        },
+        "workspaces": workspace_state,
+        "paperclip": paperclip_state,
+    })
 
 
 async def api_logs(request: Request):
@@ -838,8 +937,10 @@ async def api_config_reset(request: Request):
     async with cfg_lock:
         if ENV_FILE.exists():
             ENV_FILE.unlink()
+        ensure_workspace_layout()
+        ensure_paperclip_layout()
         write_config_yaml({})
-    return JSONResponse({"ok": True})
+    return JSONResponse({"ok": True, "workspaces_preserved": True})
 
 
 # ── Pairing ───────────────────────────────────────────────────────────────────
@@ -934,11 +1035,12 @@ async def api_pairing_revoke(request: Request):
 
 # ── App lifecycle ─────────────────────────────────────────────────────────────
 async def auto_start():
-    data = read_env(ENV_FILE)
-    if any(data.get(k) for k in PROVIDER_KEYS):
+    ensure_workspace_layout()
+    ensure_paperclip_layout()
+    if is_config_complete():
         asyncio.create_task(gw.start())
     else:
-        print("[server] No provider key found — gateway not started. Configure one in the admin UI.", flush=True)
+        print("[server] Setup incomplete — gateway not started. Complete workspace bootstrap, model, provider, and channel configuration in the admin UI.", flush=True)
 
 
 @asynccontextmanager
