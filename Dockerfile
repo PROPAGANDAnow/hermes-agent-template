@@ -1,7 +1,11 @@
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl ca-certificates git && \
+    apt-get install -y --no-install-recommends curl ca-certificates git gnupg && \
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
+    npm install -g paperclipai && \
+    npm cache clean --force && \
     rm -rf /var/lib/apt/lists/*
 
 # Install hermes-agent as a package (gives us the `hermes` CLI entry point)

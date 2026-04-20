@@ -1,6 +1,6 @@
-# Hermes Agent — Railway Template
+# Hermes Agent + Paperclip — Railway Template
 
-Deploy [Hermes Agent](https://github.com/NousResearch/hermes-agent) on [Railway](https://railway.app) with a web-based admin dashboard for configuration, gateway management, and user pairing.
+Deploy [Hermes Agent](https://github.com/NousResearch/hermes-agent) on [Railway](https://railway.app) with a web-based admin dashboard for configuration, gateway management, user pairing, and a bundled [Paperclip](https://github.com/paperclipai/paperclip) runtime in the same template.
 
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/hermes-agent-ai?referralCode=QXdhdr&utm_medium=integration&utm_source=template&utm_campaign=generic)
 
@@ -12,8 +12,10 @@ Deploy [Hermes Agent](https://github.com/NousResearch/hermes-agent) on [Railway]
 ## Features
 
 - **First-Run Setup vs Manage UX** — the admin UI separates initial setup from ongoing monitoring and management
-- **Persistent Workspace Bootstrap** — deterministic workspaces under `/data/.hermes/workspaces/{default,projects,scratch,shared}` on every boot
+- **Merged Hermes + Paperclip Runtime** — the image installs `paperclipai` alongside Hermes so both tools are available in one Railway deployment
+- **Persistent Workspace Bootstrap** — deterministic Hermes workspaces under `/data/.hermes/workspaces/{default,projects,scratch,shared}` on every boot
 - **Persistent Default CWD** — generated Hermes config points terminal `cwd` at `/data/.hermes/workspaces/default` instead of `/tmp`
+- **Bundled Paperclip Home + Workspace** — Paperclip persists its state in `/data/.paperclip` and gets a dedicated workspace at `/data/workspaces/paperclip`
 - **Stronger Readiness Checks** — setup is only complete when workspace layout, model, provider key, and at least one channel are configured
 - **Admin Dashboard** — dark-themed UI to configure providers, channels, tools, and manage the gateway
 - **Gateway Management** — start, stop, restart the Hermes gateway from the browser
@@ -48,7 +50,7 @@ Hermes Agent interacts entirely through messaging channels — there is no chat 
 3. Attach a **volume** mounted at `/data` (persists config across redeploys)
 4. Open your app URL — log in with username `admin` and your password
 
-### 4. Configure in the Admin Dashboard
+### 4. Configure Hermes in the Admin Dashboard
 
 On first visit, the admin dashboard opens to the **Setup** view. Setup is only considered complete when all four checks pass:
 
@@ -64,7 +66,27 @@ Once those are saved, the **Manage** surfaces unlock:
 - **Users** handles pairing approvals
 - **Manage panels** stay available for operations like status checks, logs, terminal access, file browsing, and pairing review
 
-### 5. Start Chatting
+### 5. Use the bundled Paperclip runtime
+
+This template now installs Paperclip in the same container.
+
+- `paperclipai` is installed in the image and exposed through the admin terminal
+- Paperclip state persists under `/data/.paperclip`
+- A dedicated Paperclip workspace is created at `/data/workspaces/paperclip`
+
+Recommended first-run flow:
+
+1. Finish Hermes setup in the admin UI
+2. Open the **Terminal** panel
+3. Run:
+
+```bash
+paperclipai onboard --yes
+```
+
+You can then inspect Paperclip state from the **Files** panel by selecting the `paperclip` root.
+
+### 6. Start Chatting
 
 Message your Telegram bot. If you're a new user, a pairing request will appear in the admin dashboard under **Users** — click **Approve**, and you're in.
 
@@ -84,6 +106,8 @@ All model, provider, channel, and tool settings are managed through the setup UI
 
 ## Workspace Behavior
 
+### Hermes workspaces
+
 The wrapper bootstraps these persistent directories under `HERMES_HOME/workspaces`:
 
 - `default` — default Hermes terminal cwd
@@ -93,7 +117,14 @@ The wrapper bootstraps these persistent directories under `HERMES_HOME/workspace
 
 A wrapper-owned metadata file is also written to `HERMES_HOME/workspaces/.bootstrap.json` so the UI can display workspace state.
 
-Resetting config from the admin UI **does not delete these workspaces**.
+### Paperclip runtime paths
+
+The merged template also creates persistent Paperclip paths:
+
+- `PAPERCLIP_HOME=/data/.paperclip`
+- `PAPERCLIP_WORKSPACE=/data/workspaces/paperclip`
+
+Resetting config from the admin UI **does not delete Hermes workspaces or the Paperclip home**.
 
 ## Supported Providers
 
@@ -113,12 +144,13 @@ Parallel (search), Firecrawl (scraping), Tavily (search), FAL (image gen), Brows
 Railway Container
 ├── Python Admin Server (Starlette + Uvicorn)
 │   ├── /            — setup + management UI (basic auth)
-│   ├── /api/*       — config, status, logs, gateway, pairing, readiness, workspaces
+│   ├── /api/*       — config, status, logs, gateway, pairing, readiness, workspaces, paperclip runtime state
 │   └── /health      — health check (no auth)
-└── hermes gateway   — managed as async subprocess
+├── hermes gateway   — managed as async subprocess
+└── paperclipai CLI  — bundled runtime available from the admin terminal
 ```
 
-The admin server runs on `$PORT` and manages Hermes as child subprocesses. Config is stored in `/data/.hermes/.env` and `/data/.hermes/config.yaml`. Workspace state lives under `/data/.hermes/workspaces`, and the generated Hermes config uses `/data/.hermes/workspaces/default` as the default terminal cwd. Gateway stdout/stderr is captured into a ring buffer and streamed to the Logs panel.
+The admin server runs on `$PORT` and manages Hermes as child subprocesses. Config is stored in `/data/.hermes/.env` and `/data/.hermes/config.yaml`. Workspace state lives under `/data/.hermes/workspaces`, and the generated Hermes config uses `/data/.hermes/workspaces/default` as the default terminal cwd. Paperclip is installed in the same image, persists state in `/data/.paperclip`, and gets a dedicated workspace at `/data/workspaces/paperclip`. Gateway stdout/stderr is captured into a ring buffer and streamed to the Logs panel.
 
 ## Running Locally
 

@@ -11,6 +11,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import signal
 import time
 from collections import deque
@@ -41,11 +42,15 @@ ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 HERMES_HOME = os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))
+PAPERCLIP_HOME = os.environ.get("PAPERCLIP_HOME", "/data/.paperclip")
+PAPERCLIP_WORKSPACE = os.environ.get("PAPERCLIP_WORKSPACE", "/data/workspaces/paperclip")
 ENV_FILE = Path(HERMES_HOME) / ".env"
 PAIRING_DIR = Path(HERMES_HOME) / "pairing"
 WORKSPACES_DIR = Path(HERMES_HOME) / "workspaces"
 WORKSPACE_NAMES = ("default", "projects", "scratch", "shared")
 WORKSPACE_METADATA_FILE = WORKSPACES_DIR / ".bootstrap.json"
+PAPERCLIP_HOME_DIR = Path(PAPERCLIP_HOME)
+PAPERCLIP_WORKSPACE_DIR = Path(PAPERCLIP_WORKSPACE)
 PAIRING_TTL = 3600
 TERMINAL_TASK_ID = "hermes-admin-terminal"
 TERMINAL_BOOT_COMMAND = os.environ.get("ADMIN_TERMINAL_COMMAND", "bash -i")
@@ -55,6 +60,7 @@ MAX_FILE_READ_BYTES = 100_000
 FILE_BROWSER_ROOTS = {
     "data": Path("/data"),
     "hermes": Path(HERMES_HOME),
+    "paperclip": PAPERCLIP_HOME_DIR,
     "app": Path(__file__).parent.resolve(),
 }
 
@@ -212,6 +218,23 @@ def ensure_workspace_layout() -> dict:
     }
     WORKSPACE_METADATA_FILE.write_text(json.dumps(state, indent=2, sort_keys=True))
     return state
+
+
+def ensure_paperclip_layout() -> dict:
+    """Create and describe the persistent Paperclip runtime layout bundled with the template."""
+    PAPERCLIP_HOME_DIR.mkdir(parents=True, exist_ok=True)
+    (PAPERCLIP_HOME_DIR / "logs").mkdir(parents=True, exist_ok=True)
+    (PAPERCLIP_HOME_DIR / "storage").mkdir(parents=True, exist_ok=True)
+    PAPERCLIP_WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
+    binary_path = shutil.which("paperclipai")
+    return {
+        "installed": bool(binary_path),
+        "binary_path": binary_path or "",
+        "home": str(PAPERCLIP_HOME_DIR),
+        "workspace": str(PAPERCLIP_WORKSPACE_DIR),
+        "onboard_command": "paperclipai onboard --yes",
+        "run_command": "paperclipai run",
+    }
 
 
 def channel_is_configured(key: str, value: str) -> bool:
@@ -602,6 +625,7 @@ async def api_config_get(request: Request):
             "checklist": setup_checklist(data),
         },
         "workspaces": ensure_workspace_layout(),
+        "paperclip": ensure_paperclip_layout(),
     })
 
 
@@ -633,6 +657,7 @@ async def api_status(request: Request):
     if err := guard(request): return err
     data = read_env(ENV_FILE)
     workspace_state = ensure_workspace_layout()
+    paperclip_state = ensure_paperclip_layout()
     providers = {
         k.replace("_API_KEY","").replace("_TOKEN","").replace("HF_","HuggingFace ").replace("_"," ").title():
         {"configured": bool(data.get(k))}
@@ -652,6 +677,7 @@ async def api_status(request: Request):
             "checklist": checklist,
         },
         "workspaces": workspace_state,
+        "paperclip": paperclip_state,
     })
 
 
@@ -912,6 +938,7 @@ async def api_config_reset(request: Request):
         if ENV_FILE.exists():
             ENV_FILE.unlink()
         ensure_workspace_layout()
+        ensure_paperclip_layout()
         write_config_yaml({})
     return JSONResponse({"ok": True, "workspaces_preserved": True})
 
@@ -1009,6 +1036,7 @@ async def api_pairing_revoke(request: Request):
 # ── App lifecycle ─────────────────────────────────────────────────────────────
 async def auto_start():
     ensure_workspace_layout()
+    ensure_paperclip_layout()
     if is_config_complete():
         asyncio.create_task(gw.start())
     else:

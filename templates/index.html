@@ -629,7 +629,7 @@
       <div class="panel-body">
 
         <div style="background:rgba(98,114,255,0.06);border:1px solid rgba(98,114,255,0.2);border-radius:8px;padding:12px 14px;margin-bottom:16px;font-size:13px;color:var(--text-dim);line-height:1.6;">
-          <strong style="color:var(--text)">Setup</strong> is for first-run configuration: workspace bootstrap, model, provider key, and at least one channel. Once those are saved, use <strong style="color:var(--text)">Manage</strong> areas like Status, Logs, Terminal, Files, and Users.
+          <strong style="color:var(--text)">Setup</strong> is for first-run configuration: workspace bootstrap, model, provider key, and at least one channel. Once those are saved, use <strong style="color:var(--text)">Manage</strong> areas like Status, Logs, Terminal, Files, and Users. This merged template also bundles Paperclip, so the Terminal and Files panels double as your Paperclip control surface.
           <br><br>
           New to Hermes? Head over to the <a href="#" @click.prevent="page='guide'" style="color:var(--accent2);text-decoration:none;font-weight:500;">How to Setup</a> section for a step-by-step guide on getting started.
         </div>
@@ -676,6 +676,27 @@
               </template>
             </tbody>
           </table>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Bundled Paperclip runtime</div>
+          <p class="hint" style="margin:0 0 12px;line-height:1.6;">This merged template now installs the <code>paperclipai</code> CLI alongside Hermes. Use the <strong>Terminal</strong> panel to run onboarding, and the <strong>Files</strong> panel to inspect the persistent Paperclip home.</p>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;">
+              <span>CLI installed</span>
+              <span class="chip" :class="paperclip.installed ? 'green' : 'dim'" x-text="paperclip.installed ? '✓ installed' : 'missing'"></span>
+            </div>
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;">
+              <span>Paperclip workspace</span>
+              <span class="chip green">persistent</span>
+            </div>
+          </div>
+          <div class="hint" style="margin-top:12px;line-height:1.7;">
+            Binary: <code x-text="paperclip.binary_path || 'paperclipai'"></code><br>
+            Home: <code x-text="paperclip.home || '/data/.paperclip'"></code><br>
+            Workspace: <code x-text="paperclip.workspace || '/data/workspaces/paperclip'"></code><br>
+            Onboard: <code x-text="paperclip.onboard_command || 'paperclipai onboard --yes'"></code>
+          </div>
         </div>
         <!-- LLM Provider -->
         <div class="section-label">
@@ -892,7 +913,7 @@
           <button class="btn"         @click="restartGateway()">↺ Restart</button>
         </div>
 
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
           <div class="card">
             <div class="card-title">Setup readiness</div>
             <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);">
@@ -918,6 +939,30 @@
                 <span class="chip" :class="info.exists ? 'green' : 'dim'" x-text="info.exists ? '✓ ready' : 'missing'"></span>
               </div>
             </template>
+          </div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px;">
+          <div class="card">
+            <div class="card-title">Bundled Paperclip</div>
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);">
+              <span>paperclipai CLI</span>
+              <span class="chip" :class="paperclip.installed ? 'green' : 'dim'" x-text="paperclip.installed ? '✓ installed' : 'missing'"></span>
+            </div>
+            <div style="padding-top:10px;font-family:var(--font-mono);font-size:11px;color:var(--text-dim);line-height:1.6;word-break:break-all;">
+              <div>binary: <span x-text="paperclip.binary_path || 'paperclipai'"></span></div>
+              <div>home: <span x-text="paperclip.home || '/data/.paperclip'"></span></div>
+              <div>workspace: <span x-text="paperclip.workspace || '/data/workspaces/paperclip'"></span></div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-title">Paperclip quickstart</div>
+            <div class="hint" style="margin:0 0 10px;line-height:1.7;">
+              Open the <strong>Terminal</strong> panel and start with:<br>
+              <code x-text="paperclip.onboard_command || 'paperclipai onboard --yes'"></code>
+              <br><br>
+              Paperclip data persists in <code x-text="paperclip.home || '/data/.paperclip'"></code> and you can browse it from the <strong>Files</strong> panel by choosing the <code>paperclip</code> root.
+            </div>
           </div>
         </div>
 
@@ -1252,6 +1297,7 @@ function app() {
     status: {},
     setup: { ready: false, checklist: {} },
     workspaces: { workspaces: {} },
+    paperclip: {},
     logs: [],
     pending: [],
     approved: [],
@@ -1380,6 +1426,7 @@ function app() {
           this.vars = d.vars || {};
           this.setup = d.setup || { ready: false, checklist: {} };
           this.workspaces = d.workspaces || { workspaces: {} };
+          this.paperclip = d.paperclip || {};
           // Detect active provider
           for (const [name, p] of Object.entries(this.providerMap)) {
             if (this.vars[p.key]) { this.selectedProvider = name; break; }
@@ -1417,7 +1464,7 @@ function app() {
     },
 
     async resetConfig() {
-      if (!confirm('Reset saved configuration? This stops the gateway and clears env-based setup, but preserves persistent workspaces under /data/.hermes/workspaces.')) return;
+      if (!confirm('Reset saved configuration? This stops the gateway and clears env-based setup, but preserves persistent Hermes workspaces under /data/.hermes/workspaces and the bundled Paperclip home under /data/.paperclip.')) return;
       const r = await fetch('/api/config/reset', { method: 'POST' });
       if (r.ok) {
         await this.loadConfig();
@@ -1438,6 +1485,7 @@ function app() {
           this.gw = d.gateway || {};
           this.setup = d.setup || this.setup;
           this.workspaces = d.workspaces || this.workspaces;
+          this.paperclip = d.paperclip || this.paperclip;
         }
       } catch {}
     },

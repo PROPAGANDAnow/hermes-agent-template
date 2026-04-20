@@ -8,7 +8,11 @@ from pathlib import Path
 
 def load_server(tmp_path: Path):
     hermes_home = tmp_path / ".hermes"
+    paperclip_home = tmp_path / ".paperclip"
+    paperclip_workspace = tmp_path / "workspaces" / "paperclip"
     os.environ["HERMES_HOME"] = str(hermes_home)
+    os.environ["PAPERCLIP_HOME"] = str(paperclip_home)
+    os.environ["PAPERCLIP_WORKSPACE"] = str(paperclip_workspace)
     os.environ["ADMIN_PASSWORD"] = "test-admin-password"
 
     module_name = f"server_test_{tmp_path.name}"
@@ -74,17 +78,24 @@ def test_config_complete_requires_workspace_model_provider_and_channel(tmp_path)
     }) is True
 
 
-def test_api_status_includes_setup_checklist_and_workspace_state(tmp_path):
+def test_api_status_includes_setup_checklist_workspace_state_and_paperclip_runtime(tmp_path):
     server = load_server(tmp_path)
     server.ensure_workspace_layout()
+    server.ensure_paperclip_layout()
     server.write_env(server.ENV_FILE, {
         "LLM_MODEL": "model",
         "OPENROUTER_API_KEY": "key",
         "TELEGRAM_BOT_TOKEN": "token",
     })
 
-    server.guard = lambda request: None
-    response = asyncio.run(server.api_status(None))
+    original_which = server.shutil.which
+    server.shutil.which = lambda command: "/usr/local/bin/paperclipai" if command == "paperclipai" else original_which(command)
+    try:
+        server.guard = lambda request: None
+        response = asyncio.run(server.api_status(None))
+    finally:
+        server.shutil.which = original_which
+
     payload = json.loads(response.body)
 
     assert payload["setup"]["ready"] is True
@@ -96,6 +107,31 @@ def test_api_status_includes_setup_checklist_and_workspace_state(tmp_path):
     }
     assert payload["workspaces"]["default_cwd"] == str(tmp_path / ".hermes" / "workspaces" / "default")
     assert payload["workspaces"]["workspaces"]["projects"]["exists"] is True
+    assert payload["paperclip"]["installed"] is True
+    assert payload["paperclip"]["binary_path"] == "/usr/local/bin/paperclipai"
+    assert payload["paperclip"]["home"] == str(tmp_path / ".paperclip")
+    assert payload["paperclip"]["workspace"] == str(tmp_path / "workspaces" / "paperclip")
+
+
+def test_paperclip_layout_creates_expected_paths_and_commands(tmp_path):
+    server = load_server(tmp_path)
+
+    original_which = server.shutil.which
+    server.shutil.which = lambda command: "/usr/local/bin/paperclipai" if command == "paperclipai" else original_which(command)
+    try:
+        state = server.ensure_paperclip_layout()
+    finally:
+        server.shutil.which = original_which
+
+    paperclip_home = tmp_path / ".paperclip"
+    paperclip_workspace = tmp_path / "workspaces" / "paperclip"
+    assert state["installed"] is True
+    assert state["binary_path"] == "/usr/local/bin/paperclipai"
+    assert state["home"] == str(paperclip_home)
+    assert state["workspace"] == str(paperclip_workspace)
+    assert state["onboard_command"] == "paperclipai onboard --yes"
+    assert paperclip_home.is_dir()
+    assert paperclip_workspace.is_dir()
 
 
 def test_config_reset_preserves_workspace_directories(tmp_path):
