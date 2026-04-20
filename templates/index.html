@@ -624,10 +624,59 @@
     <div class="panel" :class="{active: page==='setup'}">
       <div class="panel-header">
         <div class="panel-title">Setup</div>
-        <div class="panel-subtitle">Configure your Hermes Agent</div>
+        <div class="panel-subtitle" x-text="setup.ready ? 'Setup complete — use Manage for operations' : 'Complete setup checklist to unlock Manage'"></div>
       </div>
       <div class="panel-body">
 
+        <div style="background:rgba(98,114,255,0.06);border:1px solid rgba(98,114,255,0.2);border-radius:8px;padding:12px 14px;margin-bottom:16px;font-size:13px;color:var(--text-dim);line-height:1.6;">
+          <strong style="color:var(--text)">Setup</strong> is for first-run configuration: workspace bootstrap, model, provider key, and at least one channel. Once those are saved, use <strong style="color:var(--text)">Manage</strong> areas like Status, Logs, Terminal, Files, and Users.
+          <br><br>
+          New to Hermes? Head over to the <a href="#" @click.prevent="page='guide'" style="color:var(--accent2);text-decoration:none;font-weight:500;">How to Setup</a> section for a step-by-step guide on getting started.
+        </div>
+
+        <div class="card">
+          <div class="card-title">Setup checklist</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;">
+              <span>Workspace layout</span>
+              <span class="chip" :class="setup.checklist.workspace_layout ? 'green' : 'dim'" x-text="setup.checklist.workspace_layout ? '✓ ready' : 'missing'"></span>
+            </div>
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;">
+              <span>Model configured</span>
+              <span class="chip" :class="setup.checklist.model_configured ? 'green' : 'dim'" x-text="setup.checklist.model_configured ? '✓ set' : 'missing'"></span>
+            </div>
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;">
+              <span>Provider key configured</span>
+              <span class="chip" :class="setup.checklist.provider_configured ? 'green' : 'dim'" x-text="setup.checklist.provider_configured ? '✓ set' : 'missing'"></span>
+            </div>
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;">
+              <span>Channel configured</span>
+              <span class="chip" :class="setup.checklist.channel_configured ? 'green' : 'dim'" x-text="setup.checklist.channel_configured ? '✓ set' : 'missing'"></span>
+            </div>
+          </div>
+          <div class="hint" style="margin-top:12px;line-height:1.6;">
+            Default workspace cwd: <code x-text="workspaces.default_cwd || '/data/.hermes/workspaces/default'"></code>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Persistent workspaces</div>
+          <p class="hint" style="margin:0 0 12px;line-height:1.6;">Hermes now boots with persistent wrapper-managed workspaces under <code x-text="workspaces.root || '/data/.hermes/workspaces'"></code>. Resetting config preserves these directories by default.</p>
+          <table class="data-table">
+            <thead>
+              <tr><th>Name</th><th>Path</th><th>Status</th></tr>
+            </thead>
+            <tbody>
+              <template x-for="(info, name) in workspaces.workspaces || {}" :key="name">
+                <tr>
+                  <td x-text="name"></td>
+                  <td style="font-family:var(--font-mono);font-size:11px;word-break:break-all;" x-text="info.path"></td>
+                  <td><span class="chip" :class="info.exists ? 'green' : 'dim'" x-text="info.exists ? '✓ ready' : 'missing'"></span></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
         <!-- LLM Provider -->
         <div class="section-label">
           LLM Provider
@@ -802,7 +851,7 @@
           <input type="checkbox" x-model="restartOnSave"> Restart gateway after save
         </label>
         <button class="btn primary" @click="saveConfig()" :disabled="saving">
-          <span x-show="!saving">Save &amp; Start</span>
+          <span x-show="!saving" x-text="setup.ready ? 'Save Changes' : 'Save Setup & Start'"></span>
           <span x-show="saving">Saving…</span>
         </button>
       </div>
@@ -841,6 +890,35 @@
           <button class="btn success" @click="startGw()"        :disabled="gw.state==='running'">▶ Start</button>
           <button class="btn danger"  @click="stopGw()"         :disabled="gw.state==='stopped'">■ Stop</button>
           <button class="btn"         @click="restartGateway()">↺ Restart</button>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;">
+          <div class="card">
+            <div class="card-title">Setup readiness</div>
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);">
+              <span>Wrapper setup complete</span>
+              <span class="chip" :class="setup.ready ? 'green' : 'dim'" x-text="setup.ready ? '✓ ready' : 'incomplete'"></span>
+            </div>
+            <template x-for="(done, key) in setup.checklist || {}" :key="key">
+              <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);">
+                <span style="text-transform:capitalize;" x-text="key.replaceAll('_', ' ')"></span>
+                <span class="chip" :class="done ? 'green' : 'dim'" x-text="done ? '✓' : 'missing'"></span>
+              </div>
+            </template>
+          </div>
+          <div class="card">
+            <div class="card-title">Workspace state</div>
+            <div class="hint" style="margin:0 0 10px;line-height:1.6;">Default cwd: <code x-text="workspaces.default_cwd || '—'"></code></div>
+            <template x-for="(info, name) in workspaces.workspaces || {}" :key="name">
+              <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);gap:12px;">
+                <div>
+                  <div style="font-size:13px;" x-text="name"></div>
+                  <div style="font-family:var(--font-mono);font-size:11px;color:var(--text-dim);word-break:break-all;" x-text="info.path"></div>
+                </div>
+                <span class="chip" :class="info.exists ? 'green' : 'dim'" x-text="info.exists ? '✓ ready' : 'missing'"></span>
+              </div>
+            </template>
+          </div>
         </div>
 
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
@@ -1172,6 +1250,8 @@ function app() {
     vars: {},
     gw: {},
     status: {},
+    setup: { ready: false, checklist: {} },
+    workspaces: { workspaces: {} },
     logs: [],
     pending: [],
     approved: [],
@@ -1246,8 +1326,7 @@ function app() {
     },
 
     get isSetupDone() {
-      const keys = Object.values(this.providerMap).map(p => p.key);
-      return !!(this.vars.LLM_MODEL && keys.some(k => this.vars[k]));
+      return !!this.setup.ready;
     },
 
     onProviderChange() {
@@ -1299,6 +1378,8 @@ function app() {
         if (r.ok) {
           const d = await r.json();
           this.vars = d.vars || {};
+          this.setup = d.setup || { ready: false, checklist: {} };
+          this.workspaces = d.workspaces || { workspaces: {} };
           // Detect active provider
           for (const [name, p] of Object.entries(this.providerMap)) {
             if (this.vars[p.key]) { this.selectedProvider = name; break; }
@@ -1336,7 +1417,7 @@ function app() {
     },
 
     async resetConfig() {
-      if (!confirm('Reset all configuration? This will stop the gateway and clear all saved settings.')) return;
+      if (!confirm('Reset saved configuration? This stops the gateway and clears env-based setup, but preserves persistent workspaces under /data/.hermes/workspaces.')) return;
       const r = await fetch('/api/config/reset', { method: 'POST' });
       if (r.ok) {
         await this.loadConfig();
@@ -1351,7 +1432,13 @@ function app() {
     async loadStatus() {
       try {
         const r = await fetch('/api/status');
-        if (r.ok) { const d = await r.json(); this.status = d; this.gw = d.gateway||{}; }
+        if (r.ok) {
+          const d = await r.json();
+          this.status = d;
+          this.gw = d.gateway || {};
+          this.setup = d.setup || this.setup;
+          this.workspaces = d.workspaces || this.workspaces;
+        }
       } catch {}
     },
 

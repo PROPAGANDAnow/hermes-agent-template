@@ -11,14 +11,16 @@ Deploy [Hermes Agent](https://github.com/NousResearch/hermes-agent) on [Railway]
 
 ## Features
 
+- **First-Run Setup vs Manage UX** — the admin UI separates initial setup from ongoing monitoring and management
+- **Persistent Workspace Bootstrap** — deterministic workspaces under `/data/.hermes/workspaces/{default,projects,scratch,shared}` on every boot
+- **Persistent Default CWD** — generated Hermes config points terminal `cwd` at `/data/.hermes/workspaces/default` instead of `/tmp`
+- **Stronger Readiness Checks** — setup is only complete when workspace layout, model, provider key, and at least one channel are configured
 - **Admin Dashboard** — dark-themed UI to configure providers, channels, tools, and manage the gateway
-- **One-Page Setup** — provider dropdown, checkbox-based channel/tool toggles — no config files to edit
 - **Gateway Management** — start, stop, restart the Hermes gateway from the browser
-- **Live Status** — stat cards for gateway state, uptime, model, and pending pairing requests
-- **Live Logs** — streaming gateway log viewer
+- **Live Status + Logs** — gateway state, setup checklist, workspace state, pairing status, and live logs
 - **User Pairing** — approve or deny users who message your bot, revoke access anytime
-- **Basic Auth** — password-protected admin panel
-- **Reset Config** — one-click reset to start fresh
+- **Basic Auth** — password-protected admin panel for configuration and operations
+- **Safe Reset** — clears saved setup/config without deleting persistent workspaces by default
 
 ## Getting Started
 
@@ -48,9 +50,19 @@ Hermes Agent interacts entirely through messaging channels — there is no chat 
 
 ### 4. Configure in the Admin Dashboard
 
-1. **LLM Provider** — select OpenRouter from the dropdown, paste your API key, enter the model name
-2. **Messaging Channel** — check Telegram, paste the Bot Token from BotFather
-3. Click **Save & Start** — the gateway will start and your bot goes live
+On first visit, the admin dashboard opens to the **Setup** view. Setup is only considered complete when all four checks pass:
+
+1. **Workspace layout initialized** — the wrapper bootstraps `/data/.hermes/workspaces/default`, `projects`, `scratch`, and `shared`
+2. **Model configured** — set `LLM_MODEL`
+3. **Provider key configured** — add at least one provider API key
+4. **Channel configured** — enable at least one channel such as Telegram, Discord, or Slack
+
+Once those are saved, the **Manage** surfaces unlock:
+
+- **Status** shows the readiness checklist, workspace state, gateway state, providers, and channels
+- **Logs** streams gateway output
+- **Users** handles pairing approvals
+- **Manage panels** stay available for operations like status checks, logs, terminal access, file browsing, and pairing review
 
 ### 5. Start Chatting
 
@@ -64,10 +76,24 @@ Message your Telegram bot. If you're a new user, a pairing request will appear i
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `8080` | Web server port (set automatically by Railway) |
-| `ADMIN_USERNAME` | `admin` | Basic auth username |
-| `ADMIN_PASSWORD` | *(auto-generated)* | Basic auth password — if unset, a random password is printed to logs |
+| `ADMIN_USERNAME` | `admin` | Admin login username |
+| `ADMIN_PASSWORD` | *(auto-generated)* | Admin login password — if unset, a random password is printed to logs |
+| `HERMES_HOME` | `/data/.hermes` | Persistent Hermes home directory |
 
-All other configuration (LLM provider, model, channels, tools) is managed through the admin dashboard.
+All model, provider, channel, and tool settings are managed through the setup UI and saved into `HERMES_HOME/.env` plus `HERMES_HOME/config.yaml`.
+
+## Workspace Behavior
+
+The wrapper bootstraps these persistent directories under `HERMES_HOME/workspaces`:
+
+- `default` — default Hermes terminal cwd
+- `projects` — long-lived project work
+- `scratch` — disposable ad-hoc work
+- `shared` — shared files across tasks
+
+A wrapper-owned metadata file is also written to `HERMES_HOME/workspaces/.bootstrap.json` so the UI can display workspace state.
+
+Resetting config from the admin UI **does not delete these workspaces**.
 
 ## Supported Providers
 
@@ -86,13 +112,13 @@ Parallel (search), Firecrawl (scraping), Tavily (search), FAL (image gen), Brows
 ```
 Railway Container
 ├── Python Admin Server (Starlette + Uvicorn)
-│   ├── /            — Admin dashboard (Basic Auth)
-│   ├── /health      — Health check (no auth)
-│   └── /api/*       — Config, status, logs, gateway, pairing
-└── hermes gateway   — Managed as async subprocess
+│   ├── /            — setup + management UI (basic auth)
+│   ├── /api/*       — config, status, logs, gateway, pairing, readiness, workspaces
+│   └── /health      — health check (no auth)
+└── hermes gateway   — managed as async subprocess
 ```
 
-The admin server runs on `$PORT` and manages the Hermes gateway as a child process. Config is stored in `/data/.hermes/.env` and `/data/.hermes/config.yaml`. Gateway stdout/stderr is captured into a ring buffer and streamed to the Logs panel.
+The admin server runs on `$PORT` and manages Hermes as child subprocesses. Config is stored in `/data/.hermes/.env` and `/data/.hermes/config.yaml`. Workspace state lives under `/data/.hermes/workspaces`, and the generated Hermes config uses `/data/.hermes/workspaces/default` as the default terminal cwd. Gateway stdout/stderr is captured into a ring buffer and streamed to the Logs panel.
 
 ## Running Locally
 
