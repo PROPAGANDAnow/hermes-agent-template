@@ -49,6 +49,7 @@ TERMINAL_BOOT_COMMAND = os.environ.get("ADMIN_TERMINAL_COMMAND", "bash -i")
 CRON_OUTPUT_DIR = Path(HERMES_HOME) / "cron" / "output"
 MAX_CRON_OUTPUT_BYTES = 100_000
 MAX_FILE_READ_BYTES = 100_000
+SLACK_HOME_DEFAULT = "D0APLKQ58J1"
 FILE_BROWSER_ROOTS = {
     "data": Path("/data"),
     "hermes": Path(HERMES_HOME),
@@ -89,6 +90,8 @@ ENV_VARS = [
     ("DISCORD_ALLOWED_USERS",    "Allowed User IDs",         "discord",   False),
     ("SLACK_BOT_TOKEN",          "Bot Token (xoxb-...)",     "slack",     True),
     ("SLACK_APP_TOKEN",          "App Token (xapp-...)",     "slack",     True),
+    ("SLACK_HOME_CHANNEL",       "Home Channel ID",          "slack",     False),
+    ("SLACK_HOME_CHANNEL_NAME",  "Home Channel Name",        "slack",     False),
     ("WHATSAPP_ENABLED",         "Enable WhatsApp",          "whatsapp",  False),
     ("EMAIL_ADDRESS",            "Email Address",            "email",     False),
     ("EMAIL_PASSWORD",           "Email Password",           "email",     True),
@@ -188,6 +191,10 @@ data_dir: "{HERMES_HOME}"
 
 def write_env(path: Path, data: dict[str, str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    normalized = dict(data)
+    if (normalized.get("SLACK_BOT_TOKEN") or normalized.get("SLACK_APP_TOKEN")) and not normalized.get("SLACK_HOME_CHANNEL"):
+        normalized["SLACK_HOME_CHANNEL"] = SLACK_HOME_DEFAULT
+
     cat_order = ["model", "provider", "tool",
                  "telegram", "discord", "slack", "whatsapp",
                  "email", "mattermost", "matrix", "gateway"]
@@ -201,7 +208,7 @@ def write_env(path: Path, data: dict[str, str]) -> None:
     grouped: dict[str, list[str]] = {c: [] for c in cat_order}
     grouped["other"] = []
 
-    for k, v in data.items():
+    for k, v in normalized.items():
         if not v:
             continue
         cat = key_cat.get(k, "other")
@@ -389,11 +396,15 @@ def _cron_job_payload(job: dict) -> dict:
     deliver = job.get("deliver", "local")
     if isinstance(deliver, list):
         deliver = ", ".join(str(item) for item in deliver)
+    schedule = job.get("schedule_display") or job.get("schedule")
+    if isinstance(schedule, dict):
+        schedule = schedule.get("display") or schedule.get("expr") or json.dumps(schedule)
+    prompt = job.get("prompt") or ((job.get("payload") or {}).get("message")) or ""
     return {
         "job_id": job.get("id"),
         "name": job.get("name") or job.get("id"),
-        "prompt": job.get("prompt", ""),
-        "schedule": job.get("schedule_display") or job.get("schedule"),
+        "prompt": prompt,
+        "schedule": schedule,
         "next_run_at": job.get("next_run_at"),
         "last_run_at": job.get("last_run_at"),
         "last_status": job.get("last_status"),
@@ -633,10 +644,12 @@ async def api_terminal_output(request: Request):
     try:
         log_data = process_registry.read_log(session_id, offset=offset, limit=500)
         status = process_registry.poll(session_id)
-        output = ANSI_ESCAPE.sub("", log_data.get("output", ""))
+        raw_output = log_data.get("output", "")
+        output = ANSI_ESCAPE.sub("", raw_output)
         return JSONResponse({
             "ok": True,
             "session": status,
+            "raw_output": raw_output,
             "output": output,
             "lines": output.splitlines(),
             "next_offset": log_data.get("total_lines", offset),
@@ -682,9 +695,12 @@ async def api_terminal_kill(request: Request):
 
 async def api_crons(request: Request):
     if err := guard(request): return err
-    jobs = [_cron_job_payload(job) for job in list_jobs(include_disabled=True)]
-    jobs.sort(key=lambda item: ((not item.get("enabled", True)), str(item.get("name") or ""), str(item.get("job_id") or "")))
-    return JSONResponse({"jobs": jobs, "gateway_running": gw.state == "running"})
+    try:
+        jobs = [_cron_job_payload(job) for job in list_jobs(include_disabled=True)]
+        jobs.sort(key=lambda item: ((not item.get("enabled", True)), str(item.get("name") or ""), str(item.get("job_id") or "")))
+        return JSONResponse({"jobs": jobs, "gateway_running": gw.state == "running"})
+    except Exception as e:
+        return JSONResponse({"error": f"Failed to load cron jobs: {e}"}, status_code=500)
 
 
 async def api_cron_outputs(request: Request):
