@@ -1,4 +1,5 @@
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+ARG HERMES_REF=v2026.4.16
 
 # Node.js is required only at build time to compile the Hermes React dashboard.
 # We strip the source + apt lists afterwards to keep the image lean.
@@ -13,8 +14,9 @@ RUN apt-get update && \
 # Deleting web/ afterwards makes hermes's internal _build_web_ui skip the
 # rebuild step (it early-returns when package.json is absent), so container
 # startup is fast and no runtime npm dependency is needed.
-RUN git clone --depth 1 https://github.com/NousResearch/hermes-agent.git /opt/hermes-agent && \
+RUN git clone --depth 1 --branch ${HERMES_REF} https://github.com/NousResearch/hermes-agent.git /tmp/hermes-agent && \
     cd /opt/hermes-agent && \
+
     uv pip install --system --no-cache -e ".[all]" && \
     cd /opt/hermes-agent/web && \
     npm install --silent && \
