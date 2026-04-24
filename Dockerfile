@@ -1,5 +1,5 @@
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
-ARG HERMES_REF=v2026.4.16
+ARG HERMES_REF=v2026.4.23
 
 # Node.js is required only at build time to compile the Hermes React dashboard.
 # We strip the source + apt lists afterwards to keep the image lean.
