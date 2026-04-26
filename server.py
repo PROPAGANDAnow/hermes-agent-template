@@ -33,6 +33,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
+import websockets
+import websockets.exceptions
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import (
@@ -41,8 +43,9 @@ from starlette.responses import (
     RedirectResponse,
     Response,
 )
-from starlette.routing import Route
+from starlette.routing import Route, WebSocketRoute
 from starlette.templating import Jinja2Templates
+from starlette.websockets import WebSocket, WebSocketDisconnect, WebSocketState
 
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
@@ -509,6 +512,12 @@ class Dashboard:
                 "--host", HERMES_DASHBOARD_HOST,
                 "--port", str(HERMES_DASHBOARD_PORT),
                 "--no-open",
+                # --tui exposes /api/pty + /api/ws + /api/events so the
+                # dashboard's embedded Chat tab works end-to-end. Requires
+                # hermes >= v2026.4.23 — older releases exit immediately
+                # with "unrecognized arguments: --tui". The Dockerfile
+                # pre-builds ui-tui/dist/ so PTY spawn is instant.
+                "--tui",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )
@@ -750,7 +759,7 @@ _WIDGET_LINK_STYLE = (
     "align-items:center;gap:6px;"
 )
 BACK_TO_SETUP_WIDGET = (
-    '<div id="hermes-back-widget" style="position:fixed;top:14px;right:14px;'
+    '<div id="hermes-back-widget" style="position:fixed;bottom:14px;right:14px;'
     'z-index:99999;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;'
     'font-size:11px;display:flex;gap:8px;">'
     f'<a href="/setup" style="{_WIDGET_LINK_STYLE}">← Setup</a>'
@@ -904,6 +913,149 @@ async def lifespan(app):
             _http_client = None
 
 
+# ── WebSocket reverse proxy ──────────────────────────────────────────────────
+# The hermes dashboard exposes 4 WebSocket endpoints when started with --tui.
+# Three are opened by the browser SPA and need to flow through our reverse
+# proxy; the fourth (/api/pub) is opened only by the PTY child against
+# loopback and is intentionally NOT proxied — exposing it would let an
+# authed user spam events into channels.
+#
+#   /api/pty     binary stream — embedded TUI keystrokes/output
+#   /api/ws      JSON-RPC      — gateway sidecar driving Chat metadata
+#   /api/events  text frames   — dashboard subscriber for /api/pub fan-out
+#
+# Auth model (matches the HTTP proxy):
+#   * Edge: our HMAC cookie via _is_authenticated. WebSocket inherits .cookies
+#     from starlette HTTPConnection so the same helper works unchanged.
+#   * Upstream: hermes's own ?token=<_SESSION_TOKEN> query param. The SPA
+#     fetches that token via /api/auth/session-token and includes it in the
+#     WS URL, so we just forward path + query verbatim.
+PROXIED_WS_PATHS = ("/api/pty", "/api/ws", "/api/events")
+
+
+async def _ws_pump_client_to_upstream(
+    client: WebSocket,
+    upstream: websockets.WebSocketClientProtocol,
+) -> None:
+    """Forward client → upstream until the client side disconnects.
+
+    Handles both binary (PTY bytes) and text (JSON-RPC) frames.
+    """
+    try:
+        while True:
+            msg = await client.receive()
+            if msg.get("type") == "websocket.disconnect":
+                return
+            data = msg.get("bytes")
+            if data is not None:
+                await upstream.send(data)
+                continue
+            text = msg.get("text")
+            if text is not None:
+                await upstream.send(text)
+    except (WebSocketDisconnect, websockets.exceptions.ConnectionClosed):
+        return
+    except Exception as e:
+        print(f"[ws-proxy] client→upstream error on {client.url.path}: {e!r}", flush=True)
+        return
+
+
+async def _ws_pump_upstream_to_client(
+    upstream: websockets.WebSocketClientProtocol,
+    client: WebSocket,
+) -> None:
+    """Forward upstream → client until upstream closes."""
+    try:
+        async for msg in upstream:
+            if isinstance(msg, bytes):
+                await client.send_bytes(msg)
+            else:
+                await client.send_text(msg)
+    except (websockets.exceptions.ConnectionClosed, WebSocketDisconnect):
+        return
+    except Exception as e:
+        print(f"[ws-proxy] upstream→client error on {client.url.path}: {e!r}", flush=True)
+        return
+
+
+async def ws_proxy(websocket: WebSocket) -> None:
+    """Reverse-proxy a single WebSocket from browser → hermes dashboard.
+
+    Order matters: connect upstream BEFORE accepting the client. If hermes
+    is wedged or rejects the upgrade, we close the client with a meaningful
+    code instead of accepting and then dropping silently.
+
+    Connection lifecycle:
+      1. Verify edge cookie auth → 4401 close on failure
+      2. Open upstream WS with bounded open_timeout → 1011 on failure
+      3. Accept client
+      4. Spawn two pump tasks (bidirectional byte forwarding)
+      5. When either direction ends (client navigates away, upstream PTY
+         exits, etc.), cancel the other task and close both sockets
+    """
+    # 1. Edge auth.
+    if not _is_authenticated(websocket):
+        # Close before accept — browser sees the handshake fail (expected
+        # for unauthenticated calls).
+        await websocket.close(code=4401)
+        return
+
+    # 2. Build upstream URL preserving the SPA's path + query (the query
+    #    contains the hermes session token + channel id).
+    path = websocket.url.path
+    qs = websocket.url.query
+    upstream_url = f"ws://{HERMES_DASHBOARD_HOST}:{HERMES_DASHBOARD_PORT}{path}"
+    if qs:
+        upstream_url = f"{upstream_url}?{qs}"
+
+    try:
+        upstream = await websockets.connect(
+            upstream_url,
+            open_timeout=5,
+            # Don't forward client cookies/headers — hermes WS auth is
+            # purely token-based via the URL, and forwarding random
+            # headers risks future upstream surprises.
+        )
+    except (asyncio.TimeoutError, OSError, websockets.exceptions.WebSocketException) as e:
+        # Hermes dashboard down, restarting, or rejected the upgrade
+        # (e.g. bad/missing session token).
+        print(f"[ws-proxy] upstream connect failed for {path}: {e!r}", flush=True)
+        # 1011 = internal error; client SPA will surface a generic close.
+        await websocket.close(code=1011)
+        return
+
+    # 3. Both sides ready — accept and start pumping.
+    await websocket.accept()
+
+    pump_in = asyncio.create_task(_ws_pump_client_to_upstream(websocket, upstream))
+    pump_out = asyncio.create_task(_ws_pump_upstream_to_client(upstream, websocket))
+
+    try:
+        # First side to finish wins; cancel the other.
+        done, pending = await asyncio.wait(
+            (pump_in, pump_out),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+    finally:
+        # websockets.connect() outside `async with` doesn't auto-close;
+        # do it explicitly. Same for the client side if still open.
+        try:
+            await upstream.close()
+        except Exception:
+            pass
+        if websocket.client_state == WebSocketState.CONNECTED:
+            try:
+                await websocket.close()
+            except Exception:
+                pass
+
+
 ANY_METHOD = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]
 
 routes = [
@@ -932,6 +1084,16 @@ routes = [
 
     # /setup/* typos return a real 404 — not a silent proxy fallthrough.
     Route("/setup/{path:path}",                 route_setup_404,     methods=ANY_METHOD),
+
+    # Reverse-proxy hermes's dashboard WebSockets (Chat tab + sidecar).
+    # WebSocketRoute is matched independently of HTTP routes, so order
+    # relative to the catch-all HTTP `Route("/{path:path}", ...)` below
+    # doesn't matter — but listing them as a group keeps the surface
+    # area auditable. Only paths in PROXIED_WS_PATHS are forwarded;
+    # /api/pub is intentionally omitted.
+    WebSocketRoute("/api/pty",                  ws_proxy),
+    WebSocketRoute("/api/ws",                   ws_proxy),
+    WebSocketRoute("/api/events",               ws_proxy),
 
     # Root: redirect to /setup if unconfigured, otherwise proxy the dashboard.
     Route("/",                                  route_root,          methods=ANY_METHOD),
