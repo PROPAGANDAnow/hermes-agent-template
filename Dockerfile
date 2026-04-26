@@ -1,4 +1,5 @@
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+ARG HERMES_REF=v2026.4.23
 
 # Which hermes-agent revision to install. Accepts any git ref the upstream
 # repo publishes — a release tag (recommended for reproducibility) or a
@@ -33,7 +34,9 @@ RUN apt-get update && \
 # rebuild step (it early-returns when package.json is absent), so container
 # startup is fast and no runtime npm dependency is needed.
 RUN git clone --depth 1 --branch ${HERMES_REF} https://github.com/NousResearch/hermes-agent.git /opt/hermes-agent && \
+
     cd /opt/hermes-agent && \
+
     uv pip install --system --no-cache -e ".[all]" && \
     cd /opt/hermes-agent/web && \
     npm install --silent && \
@@ -74,3 +77,4 @@ ENV HERMES_HOME=/data/.hermes
 # Railway's SIGTERM cleanly terminates the entire tree, not just start.sh.
 ENTRYPOINT ["/usr/bin/tini", "-g", "--"]
 CMD ["/app/start.sh"]
+

@@ -47,6 +47,12 @@ from starlette.routing import Route, WebSocketRoute
 from starlette.templating import Jinja2Templates
 from starlette.websockets import WebSocket, WebSocketDisconnect, WebSocketState
 
+from cron.jobs import get_job, list_jobs, pause_job, remove_job, resume_job, trigger_job
+from cron.scheduler import tick as cron_tick
+from hermes_cli.config import load_config
+from tools.process_registry import process_registry
+from tools.terminal_tool import terminal_tool
+
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
@@ -54,6 +60,17 @@ HERMES_HOME = os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))
 ENV_FILE = Path(HERMES_HOME) / ".env"
 PAIRING_DIR = Path(HERMES_HOME) / "pairing"
 PAIRING_TTL = 3600
+TERMINAL_TASK_ID = "hermes-admin-terminal"
+TERMINAL_BOOT_COMMAND = os.environ.get("ADMIN_TERMINAL_COMMAND", "bash -i")
+CRON_OUTPUT_DIR = Path(HERMES_HOME) / "cron" / "output"
+MAX_CRON_OUTPUT_BYTES = 100_000
+MAX_FILE_READ_BYTES = 100_000
+SLACK_HOME_DEFAULT = "D0APLKQ58J1"
+FILE_BROWSER_ROOTS = {
+    "data": Path("/data"),
+    "hermes": Path(HERMES_HOME),
+    "app": Path(__file__).parent.resolve(),
+}
 
 # Native Hermes dashboard — runs on loopback, fronted by our reverse proxy.
 HERMES_DASHBOARD_HOST = "127.0.0.1"
@@ -102,6 +119,8 @@ ENV_VARS = [
     ("DISCORD_ALLOWED_USERS",    "Allowed User IDs",         "discord",   False),
     ("SLACK_BOT_TOKEN",          "Bot Token (xoxb-...)",     "slack",     True),
     ("SLACK_APP_TOKEN",          "App Token (xapp-...)",     "slack",     True),
+    ("SLACK_HOME_CHANNEL",       "Home Channel ID",          "slack",     False),
+    ("SLACK_HOME_CHANNEL_NAME",  "Home Channel Name",        "slack",     False),
     ("WHATSAPP_ENABLED",         "Enable WhatsApp",          "whatsapp",  False),
     ("EMAIL_ADDRESS",            "Email Address",            "email",     False),
     ("EMAIL_PASSWORD",           "Email Password",           "email",     True),
@@ -148,7 +167,7 @@ def read_env(path: Path) -> dict[str, str]:
 
 
 def write_config_yaml(data: dict[str, str]) -> None:
-    """Write a minimal config.yaml so hermes picks up the model and provider."""
+    """Write config.yaml with the settings the template relies on."""
     model = data.get("LLM_MODEL", "")
     config_path = Path(HERMES_HOME) / "config.yaml"
     config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -165,12 +184,46 @@ terminal:
 agent:
   max_iterations: 50
 
+aux_models:
+  approval:
+    provider: "auto"
+    model: ""
+    base_url: ""
+    api_key: ""
+    timeout: 30
+
+display:
+  compact: true
+  personality: "kawaii"
+  resume_display: "full"
+  busy_input_mode: "interrupt"
+  bell_on_complete: false
+  show_reasoning: false
+  streaming: true
+  inline_diffs: true
+  show_cost: false
+  skin: "default"
+  tool_progress: "off"
+  interim_assistant_messages: true
+  tool_progress_command: false
+  tool_preview_length: 0
+  background_process_notifications: "all"
+  platforms: {{}}
+
+approvals:
+  mode: "off"
+  timeout: 60
+
 data_dir: "{HERMES_HOME}"
 """)
 
 
 def write_env(path: Path, data: dict[str, str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    normalized = dict(data)
+    if (normalized.get("SLACK_BOT_TOKEN") or normalized.get("SLACK_APP_TOKEN")) and not normalized.get("SLACK_HOME_CHANNEL"):
+        normalized["SLACK_HOME_CHANNEL"] = SLACK_HOME_DEFAULT
+
     cat_order = ["model", "provider", "tool",
                  "telegram", "discord", "slack", "whatsapp",
                  "email", "mattermost", "matrix", "gateway"]
@@ -184,7 +237,7 @@ def write_env(path: Path, data: dict[str, str]) -> None:
     grouped: dict[str, list[str]] = {c: [] for c in cat_order}
     grouped["other"] = []
 
-    for k, v in data.items():
+    for k, v in normalized.items():
         if not v:
             continue
         cat = key_cat.get(k, "other")
@@ -484,6 +537,194 @@ gw = Gateway()
 cfg_lock = asyncio.Lock()
 
 
+def _terminal_backend() -> str:
+    backend = os.environ.get("TERMINAL_ENV", "").strip()
+    if backend:
+        return backend
+    try:
+        config = load_config()
+        return (((config or {}).get("terminal") or {}).get("backend") or "local")
+    except Exception:
+        return "local"
+
+
+def _terminal_supported() -> bool:
+    return _terminal_backend() == "local"
+
+
+def _terminal_sessions() -> list[dict]:
+    sessions = process_registry.list_sessions(task_id=TERMINAL_TASK_ID)
+    sessions.sort(key=lambda item: (item.get("status") != "running", item.get("started_at", "")))
+    return sessions
+
+
+def _active_terminal_session_id() -> str | None:
+    sessions = _terminal_sessions()
+    if not sessions:
+        return None
+    return sessions[0].get("session_id")
+
+
+def _terminal_status_payload(session_id: str | None = None) -> dict:
+    session_id = session_id or _active_terminal_session_id()
+    payload = {
+        "backend": _terminal_backend(),
+        "interactive_supported": _terminal_supported(),
+        "boot_command": TERMINAL_BOOT_COMMAND,
+        "session": None,
+    }
+    if not session_id:
+        return payload
+    try:
+        payload["session"] = process_registry.poll(session_id)
+    except Exception as e:
+        payload["session"] = {"session_id": session_id, "status": "missing", "error": str(e)}
+    return payload
+
+
+def _cron_job_payload(job: dict) -> dict:
+    deliver = job.get("deliver", "local")
+    if isinstance(deliver, list):
+        deliver = ", ".join(str(item) for item in deliver)
+    schedule = job.get("schedule_display") or job.get("schedule")
+    if isinstance(schedule, dict):
+        schedule = schedule.get("display") or schedule.get("expr") or json.dumps(schedule)
+    prompt = job.get("prompt") or ((job.get("payload") or {}).get("message")) or ""
+    return {
+        "job_id": job.get("id"),
+        "name": job.get("name") or job.get("id"),
+        "prompt": prompt,
+        "schedule": schedule,
+        "next_run_at": job.get("next_run_at"),
+        "last_run_at": job.get("last_run_at"),
+        "last_status": job.get("last_status"),
+        "last_error": job.get("last_error"),
+        "last_delivery_error": job.get("last_delivery_error"),
+        "enabled": job.get("enabled", True),
+        "state": job.get("state", "scheduled" if job.get("enabled", True) else "paused"),
+        "paused_at": job.get("paused_at"),
+        "paused_reason": job.get("paused_reason"),
+        "deliver": deliver,
+        "script": job.get("script"),
+    }
+
+
+def _cron_output_job_dir(job_id: str) -> Path:
+    return CRON_OUTPUT_DIR / job_id
+
+
+def _validate_output_path(job_id: str, filename: str) -> Path:
+    job_dir = _cron_output_job_dir(job_id).resolve()
+    candidate = (job_dir / filename).resolve()
+    if candidate.parent != job_dir or not candidate.is_file():
+        raise FileNotFoundError("Output file not found")
+    return candidate
+
+
+def _list_cron_outputs(job_id: str, limit: int = 100) -> list[dict]:
+    job_dir = _cron_output_job_dir(job_id)
+    if not job_dir.exists():
+        return []
+    files = sorted(job_dir.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
+    outputs = []
+    for file_path in files[:limit]:
+        try:
+            stat = file_path.stat()
+            preview = file_path.read_text(encoding="utf-8", errors="replace")[:400]
+        except Exception:
+            continue
+        outputs.append({
+            "filename": file_path.name,
+            "size": stat.st_size,
+            "modified_at": stat.st_mtime,
+            "preview": preview,
+        })
+    return outputs
+
+
+def _file_browser_root(root_name: str | None) -> tuple[str, Path]:
+    root_key = (root_name or "data").strip().lower() or "data"
+    if root_key not in FILE_BROWSER_ROOTS:
+        raise ValueError("Unknown file root")
+    return root_key, FILE_BROWSER_ROOTS[root_key].resolve()
+
+
+def _resolve_browser_path(root_name: str | None, relative_path: str = "") -> tuple[str, Path, Path]:
+    root_key, root_path = _file_browser_root(root_name)
+    cleaned = (relative_path or "").strip().lstrip("/")
+    candidate = (root_path / cleaned).resolve()
+    if candidate != root_path and root_path not in candidate.parents:
+        raise ValueError("Path escapes selected root")
+    return root_key, root_path, candidate
+
+
+def _browser_relpath(root_path: Path, target_path: Path) -> str:
+    if target_path == root_path:
+        return ""
+    return str(target_path.relative_to(root_path)).replace(os.sep, "/")
+
+
+def _list_browser_entries(root_name: str | None, relative_path: str = "") -> dict:
+    root_key, root_path, current_path = _resolve_browser_path(root_name, relative_path)
+    if not current_path.exists():
+        raise FileNotFoundError("Path not found")
+    if not current_path.is_dir():
+        raise NotADirectoryError("Path is not a directory")
+    entries = []
+    for child in sorted(current_path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
+        try:
+            stat = child.stat()
+        except OSError:
+            continue
+        entries.append({
+            "name": child.name,
+            "path": _browser_relpath(root_path, child),
+            "type": "dir" if child.is_dir() else "file",
+            "size": None if child.is_dir() else stat.st_size,
+            "modified_at": stat.st_mtime,
+        })
+    parent = ""
+    if current_path != root_path:
+        parent = _browser_relpath(root_path, current_path.parent)
+    return {
+        "root": root_key,
+        "root_path": str(root_path),
+        "path": _browser_relpath(root_path, current_path),
+        "entries": entries,
+        "parent": parent,
+    }
+
+
+def _read_browser_file(root_name: str | None, relative_path: str) -> dict:
+    root_key, root_path, file_path = _resolve_browser_path(root_name, relative_path)
+    if not file_path.exists() or not file_path.is_file():
+        raise FileNotFoundError("File not found")
+    data = file_path.read_text(encoding="utf-8", errors="replace")
+    return {
+        "root": root_key,
+        "root_path": str(root_path),
+        "path": _browser_relpath(root_path, file_path),
+        "name": file_path.name,
+        "content": data[:MAX_FILE_READ_BYTES],
+        "truncated": len(data) > MAX_FILE_READ_BYTES,
+        "size": file_path.stat().st_size,
+        "modified_at": file_path.stat().st_mtime,
+    }
+
+
+def _save_browser_file(root_name: str | None, relative_path: str, content: str) -> dict:
+    root_key, root_path, file_path = _resolve_browser_path(root_name, relative_path)
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_text(content, encoding="utf-8")
+    return {
+        "root": root_key,
+        "root_path": str(root_path),
+        "path": _browser_relpath(root_path, file_path),
+        "name": file_path.name,
+        "size": file_path.stat().st_size,
+        "modified_at": file_path.stat().st_mtime,
+    }
+
 # ── Hermes dashboard subprocess ───────────────────────────────────────────────
 class Dashboard:
     """Manages the `hermes dashboard` subprocess (native Hermes web UI).
@@ -631,6 +872,238 @@ async def api_status(request: Request):
 async def api_logs(request: Request):
     if err := guard(request): return err
     return JSONResponse({"lines": list(gw.logs)})
+
+
+async def api_terminal_status(request: Request):
+    if err := guard(request): return err
+    session_id = request.query_params.get("session_id") or None
+    return JSONResponse(_terminal_status_payload(session_id))
+
+
+async def api_terminal_session(request: Request):
+    if err := guard(request): return err
+    if not _terminal_supported():
+        return JSONResponse({
+            "ok": False,
+            "error": f"Interactive terminal requires terminal.backend=local (current: {_terminal_backend()})",
+            "backend": _terminal_backend(),
+        }, status_code=400)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    command = (body.get("command") or TERMINAL_BOOT_COMMAND).strip() or TERMINAL_BOOT_COMMAND
+    existing = _active_terminal_session_id()
+    if existing:
+        try:
+            process_registry.kill_process(existing)
+        except Exception:
+            pass
+    try:
+        result = json.loads(terminal_tool(command, background=True, task_id=TERMINAL_TASK_ID, pty=True))
+        payload = _terminal_status_payload(result.get("session_id"))
+        payload.update({"ok": True, **result})
+        return JSONResponse(payload)
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
+async def api_terminal_output(request: Request):
+    if err := guard(request): return err
+    session_id = request.query_params.get("session_id") or _active_terminal_session_id()
+    if not session_id:
+        return JSONResponse({"ok": True, "session": None, "output": "", "lines": [], "next_offset": 0})
+    try:
+        offset = int(request.query_params.get("offset", "0"))
+    except ValueError:
+        offset = 0
+    try:
+        log_data = process_registry.read_log(session_id, offset=offset, limit=500)
+        status = process_registry.poll(session_id)
+        raw_output = log_data.get("output", "")
+        output = ANSI_ESCAPE.sub("", raw_output)
+        return JSONResponse({
+            "ok": True,
+            "session": status,
+            "raw_output": raw_output,
+            "output": output,
+            "lines": output.splitlines(),
+            "next_offset": log_data.get("total_lines", offset),
+            "showing": log_data.get("showing"),
+        })
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=404)
+
+
+async def api_terminal_input(request: Request):
+    if err := guard(request): return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    session_id = body.get("session_id") or _active_terminal_session_id()
+    if not session_id:
+        return JSONResponse({"error": "No active terminal session"}, status_code=404)
+    data = body.get("data", "")
+    submit = body.get("submit", True)
+    try:
+        result = process_registry.submit_stdin(session_id, data) if submit else process_registry.write_stdin(session_id, data)
+        return JSONResponse({"ok": True, **result})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+
+async def api_terminal_kill(request: Request):
+    if err := guard(request): return err
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    session_id = body.get("session_id") or _active_terminal_session_id()
+    if not session_id:
+        return JSONResponse({"ok": True, "status": "no_session"})
+    try:
+        result = process_registry.kill_process(session_id)
+        return JSONResponse({"ok": True, **result})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+
+async def api_crons(request: Request):
+    if err := guard(request): return err
+    try:
+        jobs = [_cron_job_payload(job) for job in list_jobs(include_disabled=True)]
+        jobs.sort(key=lambda item: ((not item.get("enabled", True)), str(item.get("name") or ""), str(item.get("job_id") or "")))
+        return JSONResponse({"jobs": jobs, "gateway_running": gw.state == "running"})
+    except Exception as e:
+        return JSONResponse({"error": f"Failed to load cron jobs: {e}"}, status_code=500)
+
+
+async def api_cron_outputs(request: Request):
+    if err := guard(request): return err
+    job_id = request.path_params["job_id"]
+    if not get_job(job_id):
+        return JSONResponse({"error": "Job not found"}, status_code=404)
+    return JSONResponse({"job_id": job_id, "outputs": _list_cron_outputs(job_id)})
+
+
+async def api_cron_output_get(request: Request):
+    if err := guard(request): return err
+    job_id = request.path_params["job_id"]
+    filename = request.path_params["filename"]
+    if not get_job(job_id):
+        return JSONResponse({"error": "Job not found"}, status_code=404)
+    try:
+        output_path = _validate_output_path(job_id, filename)
+        content = output_path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return JSONResponse({"error": "Output file not found"}, status_code=404)
+    return JSONResponse({
+        "job_id": job_id,
+        "filename": filename,
+        "content": content[:MAX_CRON_OUTPUT_BYTES],
+        "truncated": len(content) > MAX_CRON_OUTPUT_BYTES,
+    })
+
+
+async def api_cron_run(request: Request):
+    if err := guard(request): return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    job_id = (body.get("job_id") or "").strip()
+    job = trigger_job(job_id)
+    if not job:
+        return JSONResponse({"error": "Job not found"}, status_code=404)
+    await asyncio.to_thread(cron_tick, False)
+    refreshed = get_job(job_id) or job
+    return JSONResponse({"ok": True, "job": _cron_job_payload(refreshed)})
+
+
+async def api_cron_pause(request: Request):
+    if err := guard(request): return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    job_id = (body.get("job_id") or "").strip()
+    job = pause_job(job_id, reason="Paused from Hermes admin")
+    if not job:
+        return JSONResponse({"error": "Job not found"}, status_code=404)
+    return JSONResponse({"ok": True, "job": _cron_job_payload(job)})
+
+
+async def api_cron_resume(request: Request):
+    if err := guard(request): return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    job_id = (body.get("job_id") or "").strip()
+    job = resume_job(job_id)
+    if not job:
+        return JSONResponse({"error": "Job not found"}, status_code=404)
+    return JSONResponse({"ok": True, "job": _cron_job_payload(job)})
+
+
+async def api_cron_remove(request: Request):
+    if err := guard(request): return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    job_id = (body.get("job_id") or "").strip()
+    if not remove_job(job_id):
+        return JSONResponse({"error": "Job not found"}, status_code=404)
+    return JSONResponse({"ok": True, "job_id": job_id})
+
+
+async def api_files_list(request: Request):
+    if err := guard(request): return err
+    root = request.query_params.get("root") or "data"
+    relpath = request.query_params.get("path") or ""
+    try:
+        payload = _list_browser_entries(root, relpath)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except FileNotFoundError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except NotADirectoryError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    payload["roots"] = {name: str(path.resolve()) for name, path in FILE_BROWSER_ROOTS.items()}
+    return JSONResponse(payload)
+
+
+async def api_files_read(request: Request):
+    if err := guard(request): return err
+    root = request.query_params.get("root") or "data"
+    relpath = request.query_params.get("path") or ""
+    try:
+        payload = _read_browser_file(root, relpath)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except FileNotFoundError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    return JSONResponse(payload)
+
+
+async def api_files_save(request: Request):
+    if err := guard(request): return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    root = body.get("root") or "data"
+    relpath = (body.get("path") or "").strip()
+    content = body.get("content") or ""
+    if not relpath:
+        return JSONResponse({"error": "path is required"}, status_code=400)
+    try:
+        payload = _save_browser_file(root, relpath, content)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return JSONResponse({"ok": True, **payload})
 
 
 async def api_gw_start(request: Request):
@@ -1072,6 +1545,21 @@ routes = [
     Route("/setup/api/config",                  api_config_put,      methods=["PUT"]),
     Route("/setup/api/status",                  api_status),
     Route("/setup/api/logs",                    api_logs),
+    Route("/setup/api/terminal/status",         api_terminal_status),
+    Route("/setup/api/terminal/session",        api_terminal_session, methods=["POST"]),
+    Route("/setup/api/terminal/output",         api_terminal_output),
+    Route("/setup/api/terminal/input",          api_terminal_input, methods=["POST"]),
+    Route("/setup/api/terminal/kill",           api_terminal_kill, methods=["POST"]),
+    Route("/setup/api/crons",                   api_crons),
+    Route("/setup/api/crons/run",               api_cron_run, methods=["POST"]),
+    Route("/setup/api/crons/pause",             api_cron_pause, methods=["POST"]),
+    Route("/setup/api/crons/resume",            api_cron_resume, methods=["POST"]),
+    Route("/setup/api/crons/remove",            api_cron_remove, methods=["POST"]),
+    Route("/setup/api/crons/{job_id:str}/outputs", api_cron_outputs),
+    Route("/setup/api/crons/{job_id:str}/outputs/{filename:str}", api_cron_output_get),
+    Route("/setup/api/files",                   api_files_list),
+    Route("/setup/api/files/read",              api_files_read),
+    Route("/setup/api/files/save",              api_files_save, methods=["PUT"]),
     Route("/setup/api/gateway/start",           api_gw_start,        methods=["POST"]),
     Route("/setup/api/gateway/stop",            api_gw_stop,         methods=["POST"]),
     Route("/setup/api/gateway/restart",         api_gw_restart,      methods=["POST"]),
