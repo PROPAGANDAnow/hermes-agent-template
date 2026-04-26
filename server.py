@@ -104,6 +104,15 @@ ENV_VARS = [
     ("KIMI_API_KEY",             "Kimi",                     "provider",  True),
     ("MINIMAX_API_KEY",          "MiniMax",                  "provider",  True),
     ("HF_TOKEN",                 "Hugging Face",             "provider",  True),
+    # Added in v2026.4.23 (hermes v0.11.0). All plain API-key auth — hermes
+    # auto-routes by env-var presence, no extra config needed on our side.
+    # OAuth-based providers (Gemini CLI, Qwen OAuth, Claude Code, Copilot)
+    # are reachable via the dashboard's Keys tab and not exposed here.
+    ("NVIDIA_API_KEY",           "NVIDIA NIM",               "provider",  True),
+    ("ARCEE_API_KEY",            "Arcee AI",                 "provider",  True),
+    ("STEPFUN_API_KEY",          "Step Plan",                "provider",  True),
+    ("AI_GATEWAY_API_KEY",       "Vercel AI Gateway",        "provider",  True),
+    ("GEMINI_API_KEY",           "Google AI Studio",         "provider",  True),
     ("PARALLEL_API_KEY",         "Parallel (search)",        "tool",      True),
     ("FIRECRAWL_API_KEY",        "Firecrawl (scrape)",       "tool",      True),
     ("TAVILY_API_KEY",           "Tavily (search)",          "tool",      True),

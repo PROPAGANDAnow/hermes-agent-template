@@ -878,9 +878,13 @@
         </div>
         <div class="card">
           <p class="hint" style="margin:0 0 12px;line-height:1.55;">
-            The dropdown below covers the most common providers. For the exhaustive list,
-            open the <a href="/?force=1" style="color:var(--accent2);text-decoration:none;font-weight:500;">Hermes Dashboard</a>
-            and use the <strong>Keys</strong> tab to configure any provider Hermes supports.
+            The dropdown below has the most-used providers. Hermes adds new ones
+            often and this list won't always be perfectly in sync &mdash; but every
+            provider Hermes supports is configurable from the
+            <a href="/?force=1" style="color:var(--accent2);text-decoration:none;font-weight:500;">Hermes Dashboard</a>
+            &rarr; <strong>Keys</strong> tab. A typical flow: pick one here (e.g.
+            OpenRouter) to get the agent running, then open the dashboard to add
+            or switch to any other provider you need.
           </p>
           <div>
             <label class="field-label">Provider</label>
@@ -1600,13 +1604,18 @@ function app() {
     tools,
 
     providerMap: {
-      'OpenRouter':  { key: 'OPENROUTER_API_KEY',  placeholder: 'sk-or-...' },
-      'DeepSeek':    { key: 'DEEPSEEK_API_KEY',     placeholder: 'sk-...'    },
-      'DashScope':   { key: 'DASHSCOPE_API_KEY',    placeholder: ''          },
-      'GLM / Z.AI':  { key: 'GLM_API_KEY',          placeholder: ''          },
-      'Kimi':        { key: 'KIMI_API_KEY',          placeholder: ''          },
-      'MiniMax':     { key: 'MINIMAX_API_KEY',       placeholder: ''          },
-      'HuggingFace': { key: 'HF_TOKEN',              placeholder: 'hf_...'   },
+      'OpenRouter':         { key: 'OPENROUTER_API_KEY',  placeholder: 'sk-or-...' },
+      'DeepSeek':           { key: 'DEEPSEEK_API_KEY',     placeholder: 'sk-...'    },
+      'DashScope':          { key: 'DASHSCOPE_API_KEY',    placeholder: ''          },
+      'GLM / Z.AI':         { key: 'GLM_API_KEY',          placeholder: ''          },
+      'Kimi':               { key: 'KIMI_API_KEY',          placeholder: ''          },
+      'MiniMax':            { key: 'MINIMAX_API_KEY',       placeholder: ''          },
+      'HuggingFace':        { key: 'HF_TOKEN',              placeholder: 'hf_...'   },
+      'NVIDIA NIM':         { key: 'NVIDIA_API_KEY',        placeholder: 'nvapi-...' },
+      'Arcee AI':           { key: 'ARCEE_API_KEY',         placeholder: ''          },
+      'Step Plan':          { key: 'STEPFUN_API_KEY',       placeholder: ''          },
+      'Vercel AI Gateway':  { key: 'AI_GATEWAY_API_KEY',    placeholder: ''          },
+      'Google AI Studio':   { key: 'GEMINI_API_KEY',        placeholder: 'AIza...'   },
     },
 
     selectedProvider: '',
