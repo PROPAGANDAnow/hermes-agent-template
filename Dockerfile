@@ -1,5 +1,4 @@
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
-ARG HERMES_REF=v2026.4.23
 
 # Which hermes-agent revision to install. Accepts any git ref the upstream
 # repo publishes — a release tag (recommended for reproducibility) or a
@@ -9,7 +8,7 @@ ARG HERMES_REF=v2026.4.23
 # newest tag (format `vYYYY.M.D`, e.g. `v2026.4.23`) and update the default
 # below. Use `main` only if you accept that every rebuild can pull arbitrary
 # new upstream commits.
-ARG HERMES_REF=main
+ARG HERMES_REF=v2026.4.23
 
 # tini = tiny init that we run as PID 1. Without it, hermes's grandchild
 # processes (MCP stdio servers, git, bun, browser daemons spawned by tools)
