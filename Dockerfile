@@ -8,7 +8,7 @@ FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 # newest tag (format `vYYYY.M.D`, optionally with a `.PATCH` suffix, e.g.
 # `v2026.5.29.2`) and update the default below. Use `main` only if you accept
 # that every rebuild can pull arbitrary new upstream commits.
-ARG HERMES_REF=v2026.8.31
+ARG HERMES_REF=v2026.9.11
 
 # Persist the build arg into the runtime env so the admin UI can display which
 # Hermes release this image actually pins. Reading it (rather than hardcoding a
@@ -61,12 +61,13 @@ RUN apt-get update && \
 # exclude-newer="14 days" can fail a build on a fresh dep — override with
 # `uv pip install --exclude-newer <date>`.
 #
-# v2026.8.13 made that escape hatch sharper: nemo-relay's floor moved to
-# >=0.7.1 (published 2026-08-07), which only resolves because upstream lists
-# it in exclude-newer-package. A manual `--exclude-newer <date>` re-imposes a
-# GLOBAL cutoff, so any date before 2026-08-07 leaves nemo-relay>=0.7.1
-# unsatisfiable and hard-fails the build. Same trap for cryptography==50.0.0
-# and h2 4.4.1. If you ever need that flag, pass a date >= 2026-08-07.
+# v2026.8.13 made that escape hatch sharper, and v2026.9.11 moved the floor
+# again: nemo-relay is now >=0.8.3,<0.9 (0.8.3 published 2026-09-02), which
+# only resolves because upstream lists it in exclude-newer-package. A manual
+# `--exclude-newer <date>` re-imposes a GLOBAL cutoff, so any date before
+# 2026-09-02 leaves nemo-relay>=0.8.3 unsatisfiable and hard-fails the build.
+# Same trap for cryptography==50.0.0 and h2 4.4.1. Re-read this floor on every
+# bump — it tracks whatever nemo-relay pin the pinned tag carries.
 RUN git clone --depth 1 --branch ${HERMES_REF} https://github.com/NousResearch/hermes-agent.git /opt/hermes-agent && \
     cd /opt/hermes-agent && \
     uv pip install --system --no-cache -e ".[all,messaging,tts-premium,honcho,bedrock,anthropic,edge-tts,hindsight,vision]" && \

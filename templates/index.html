@@ -1839,6 +1839,44 @@
         </div>
 
         <div class="changelog-entry major">
+          <div class="changelog-date">September 12, 2026</div>
+          <div class="changelog-meta">
+            <span class="meta-box">
+              <span class="meta-label">Git branch</span>
+              <code>release/v2026.9.11/1</code>
+            </span>
+            <span class="meta-box version">
+              <span class="meta-label">Hermes compatible version</span>
+              <code>v2026.9.11</code>
+            </span>
+          </div>
+
+          <div class="changelog-group">Hermes update</div>
+          <ul class="changelog-list">
+            <li>Updated <strong>Hermes Agent to v2026.9.11</strong> (from v2026.8.31). Two web-search providers join Setup &mdash; <strong>Tavily</strong>, which Hermes removed last release and has now restored, and <strong>Perplexity</strong>, which is new.</li>
+            <li><strong>The bot gives up on work it cannot finish.</strong> A tool call that keeps failing used to be retried until the turn ran out; it now stops after a few attempts and says so, which caps what a stuck job can cost you.</li>
+            <li><strong>Conversations no longer reset on their own.</strong> Hermes retired the automatic idle and daily reset &mdash; a chat now continues until you send <code>/new</code> or <code>/reset</code>.</li>
+            <li><strong>Finished conversations older than 90 days now get tidied up.</strong> Hermes turned this on to stop the chat history growing without bound. Open, pinned and in-progress chats are never touched, and the sweep only runs when something starts a Hermes command line &mdash; opening the <strong>Chat</strong> tab, for instance &mdash; at most once a day.</li>
+            <li><strong>A bot that hangs while starting now recovers by itself.</strong> Hermes watches its own startup and restarts if it wedges, instead of sitting there looking healthy while answering nothing.</li>
+            <li><strong>Group chat state starts fresh.</strong> Hermes moved that data into a new file and does not carry the old one across.</li>
+            <li><strong>If you installed a community plugin, check it still loads.</strong> Hermes reorganised its internals and retired the old compatibility paths on September 14. Update the plugin, or set <code>plugins.allow_deprecated_imports: true</code> from the Hermes <strong>Config</strong> tab.</li>
+          </ul>
+
+          <div class="changelog-group">Changes to support upstream updates</div>
+          <ul class="changelog-list">
+            <li><strong>Tavily is back in Setup, and Perplexity is there too.</strong> If you had picked Tavily as your search engine before it was removed, searches have been failing since &mdash; they work again, and your saved key was never touched.</li>
+            <li><strong>Restores keep working alongside Hermes&rsquo; new local-model storage.</strong> Hermes added folders for downloaded models and runtimes that it deliberately leaves out of a backup; this template now agrees with it, so a restore can no longer be refused over a file that was never meant to be in the archive.</li>
+            <li><strong>A bot token already in use can no longer keep you offline after a redeploy.</strong> Hermes now treats that as a fatal startup error rather than retrying, so the record that tracks it is kept out of your storage where it cannot outlive a restart.</li>
+          </ul>
+
+          <div class="changelog-group">Bug fixes</div>
+          <ul class="changelog-list">
+            <li><strong>A bot that fails slowly now stops retrying and tells you.</strong> The restart guard only counted failures that repeated within two minutes, so a slower loop could restart every five minutes indefinitely while Status still read &ldquo;running&rdquo;.</li>
+            <li><strong>Stopped writing a setting Hermes no longer reads.</strong> The conversation-reset policy is now inert upstream, so saving it only left a dead entry in your config file.</li>
+          </ul>
+        </div>
+
+        <div class="changelog-entry major">
           <div class="changelog-date">September 6, 2026</div>
           <div class="changelog-meta">
             <span class="meta-box">
@@ -2112,6 +2150,8 @@ function app() {
     { key: 'PARALLEL_API_KEY',       label: 'Parallel (search)',         secret: true  },
     { key: 'FIRECRAWL_API_KEY',      label: 'Firecrawl (scraping)',       secret: true  },
     { key: 'KEENABLE_API_KEY',       label: 'Keenable (search)',          secret: true  },
+    { key: 'TAVILY_API_KEY',         label: 'Tavily (search)',            secret: true  },
+    { key: 'PERPLEXITY_API_KEY',     label: 'Perplexity (search)',        secret: true  },
     { key: 'FAL_KEY',                label: 'FAL (image gen)',            secret: true  },
     { key: 'BROWSERBASE_API_KEY',    label: 'Browserbase',                secret: true  },
     { key: 'GITHUB_TOKEN',           label: 'GitHub',                     secret: true  },

@@ -294,10 +294,20 @@ ENV_VARS = [
     ("CUSTOM_PROVIDER_NAME",     "Custom Provider name",     "custom",    False),
     ("PARALLEL_API_KEY",         "Parallel (search)",        "tool",      True),
     ("FIRECRAWL_API_KEY",        "Firecrawl (scrape)",       "tool",      True),
-    # Keenable replaced Tavily in v2026.8.31 — upstream DELETED plugins/web/tavily
-    # and every TAVILY_API_KEY reader with it, so the old field wrote a key
-    # nothing reads. Keenable is the vendor hermes' own setup now offers instead.
     ("KEENABLE_API_KEY",         "Keenable (search)",        "tool",      True),
+    # Tavily was DELETED in v2026.8.31 (so we dropped this field) and RESTORED in
+    # v2026.9.11 — upstream reverted the removal, and tools/tool_backend_helpers.py
+    # now carries an empty REMOVED_BACKENDS registry naming that revert. Anyone who
+    # had selected Tavily as their web backend before the deletion has had a hard
+    # error on every search since, because tools/web_tools.py:_get_backend() returns
+    # a stored selection strictly with no fallback; restoring the field lets them see
+    # and re-enter the key. Optional by design: Tavily also works keyless once it is
+    # the selected backend, so an empty value here is a valid state.
+    ("TAVILY_API_KEY",           "Tavily (search)",          "tool",      True),
+    # New vendor in v2026.9.11 (plugins/web/perplexity). Key is REQUIRED — unlike
+    # Tavily/Keenable it has no keyless tier — and it now sits second in the
+    # autodetect ladder, so a key here is picked up on a never-configured install.
+    ("PERPLEXITY_API_KEY",       "Perplexity (search)",      "tool",      True),
     ("FAL_KEY",                  "FAL (image gen)",          "tool",      True),
     ("BROWSERBASE_API_KEY",      "Browserbase key",          "tool",      True),
     ("BROWSERBASE_PROJECT_ID",   "Browserbase project",      "tool",      False),
@@ -581,18 +591,16 @@ def write_config_yaml(data: dict[str, str], *, reset_model: bool = False) -> Non
     merged_agent.setdefault("max_iterations", 50)
     merged["agent"] = merged_agent
 
-    # Pin the conversation auto-reset policy so it doesn't depend on volume age.
-    # start.sh seeds cli-config.yaml.example only on a FRESH volume, and
-    # v2026.7.20 flipped that example (and SessionResetPolicy's own default)
-    # from "both" to "none" — so without this an existing deployment keeps
-    # resetting while a newly deployed one never does, from identical code.
-    # We keep "both" (idle + daily): it bounds context growth and preserves the
-    # agent's one turn to persist memories/skills before a wipe.
-    # setdefault, not assignment — unlike terminal.backend this is a user
-    # preference, so a value chosen in hermes' own settings survives.
-    merged_session_reset = dict(merged.get("session_reset") if isinstance(merged.get("session_reset"), dict) else {})
-    merged_session_reset.setdefault("mode", "both")
-    merged["session_reset"] = merged_session_reset
+    # NOTE: we used to pin `session_reset.mode = "both"` here so conversation
+    # auto-reset didn't depend on volume age. v2026.9.11 RETIRED the feature:
+    # SessionResetPolicy is now documented as an "inert legacy value type ...
+    # Gateway configuration and session lifecycle do not consume this datatype"
+    # (gateway/config.py), the config->gateway bridge that read it is gone
+    # (`default_reset_policy` went from 10 references to 0), and hermes dropped
+    # `session_reset` from its own known-root-keys list. Writing it now only
+    # leaves a dead key on disk — unknown top-level keys are deliberately not
+    # warned about, so it would fail silently. Conversations persist until an
+    # explicit /new or /reset; context growth is handled by compression.
 
     merged["data_dir"] = HERMES_HOME
 
@@ -784,6 +792,19 @@ def build_hermes_env() -> dict[str, str]:
     # (main.py `_under_gateway_supervisor`), never by is_gateway_supervisor_process()
     # or the s6 redirect, so it cannot alter the exit-75 restart contract.
     env.setdefault("HERMES_SUPERVISED_CHILD", "1")
+    # Keep hermes' per-token gateway locks OFF the Railway volume. They are
+    # MACHINE-local by intent (gateway/status.py `_get_lock_dir`), but they
+    # default to $HOME/.local/state/hermes/gateway-locks and the Dockerfile sets
+    # HOME=/data — so they land on the volume and outlive a redeploy, while
+    # start.sh only sweeps gateway.pid/.lock/.sock under $HERMES_HOME. That
+    # matters more since v2026.9.11: `is_global_startup_conflict`
+    # (gateway/restart.py, new) reclassifies a `<scope>_lock` conflict at STARTUP
+    # from retryable to fatal, so a single-platform deployment whose one adapter
+    # hits it exits 78 — which this supervisor deliberately never respawns. One
+    # container runs exactly one gateway, so the lock only ever needs to live as
+    # long as the container. /tmp gives it that and nothing more; hermes mkdirs
+    # the path itself. setdefault, so a Railway variable can move it back.
+    env.setdefault("HERMES_GATEWAY_LOCK_DIR", "/tmp/hermes-gateway-locks")
     # Drop inbound values first: the template is the only thing allowed to
     # decide these (this pop covers a Railway service variable, which lands in
     # our own os.environ; _sanitize_env_file() covers the .env file).
@@ -1345,6 +1366,23 @@ RESPAWN_MAX_IN_WIN = 5       # give up auto-restart after this many exits in win
 RESPAWN_BASE_DELAY = 2.0     # first backoff (seconds)
 RESPAWN_MAX_DELAY  = 30.0    # backoff cap
 
+# The window above only ever sees loops FASTER than itself: a failure cycle
+# longer than RESPAWN_WINDOW_S / RESPAWN_MAX_IN_WIN (~24s) drops its own history
+# on the next prune, so the counter never reaches the threshold and the guard
+# never fires. v2026.9.11 made that reachable: hermes_startup_watchdog.py (new)
+# os._exit(75)s a gateway that hasn't reached a live event loop in 300s, which
+# is a ~5-minute cycle — the bot never answers, /health stays 200, and the only
+# symptom is one log line every 5 minutes, forever. Upstream hit the same shape
+# and says so in gateway/restart_loop_guard.py: "A fixed-window prune only sees
+# cycles faster than the window (a slower loop drops its history every boot and
+# never trips)". So we also CHAIN exits that are close together AND short-lived.
+# Both conditions matter: the gap bound keeps unrelated failures days apart from
+# chaining, and the uptime bound means a gateway that actually served for a
+# while (an in-band /restart, say) breaks the chain instead of extending it.
+RESPAWN_CHAIN_GAP_S    = 1800   # exits further apart than this start a new chain
+RESPAWN_CHAIN_UPTIME_S = 600    # an exit after MORE uptime than this breaks the chain
+RESPAWN_MAX_CHAIN      = 8      # give up after this many chained short-lived exits
+
 
 # v2026.8.27's cross-profile ownership gate (gateway/run.py) logs this and
 # exits 1 rather than displacing a PID it cannot attribute to this HERMES_HOME.
@@ -1364,6 +1402,11 @@ class Gateway:
         self._stopping = False
         # Monotonic timestamps of recent unexpected exits (crash-loop guard).
         self._recent_exits: list[float] = []
+        # Slow-loop guard: consecutive short-lived exits, and when the last one
+        # landed. Monotonic (never wall clock) so an NTP step can't extend a chain.
+        self._exit_chain = 0
+        self._last_exit_at: float | None = None
+        self._started_monotonic: float | None = None
 
     async def start(self, *, reset_budget: bool = True):
         if self.proc and self.proc.returncode is None:
@@ -1373,6 +1416,8 @@ class Gateway:
         # accumulating toward the give-up threshold.
         if reset_budget:
             self._recent_exits.clear()
+            self._exit_chain = 0
+            self._last_exit_at = None
         self.state = "starting"
         self._stopping = False
         try:
@@ -1413,6 +1458,7 @@ class Gateway:
             )
             self.state = "running"
             self.started_at = time.time()
+            self._started_monotonic = time.monotonic()
             asyncio.create_task(self._drain(self.proc))
         except Exception as e:
             self.state = "error"
@@ -1498,16 +1544,31 @@ class Gateway:
         now = time.monotonic()
         self._recent_exits = [t for t in self._recent_exits if now - t < RESPAWN_WINDOW_S]
         self._recent_exits.append(now)
-        if len(self._recent_exits) > RESPAWN_MAX_IN_WIN:
+        # Chain short-lived exits that arrive close together (see RESPAWN_CHAIN_*).
+        uptime = now - self._started_monotonic if self._started_monotonic is not None else 0.0
+        gap = now - self._last_exit_at if self._last_exit_at is not None else None
+        if uptime > RESPAWN_CHAIN_UPTIME_S or (gap is not None and gap > RESPAWN_CHAIN_GAP_S):
+            self._exit_chain = 1
+        else:
+            self._exit_chain += 1
+        self._last_exit_at = now
+        if len(self._recent_exits) > RESPAWN_MAX_IN_WIN or self._exit_chain > RESPAWN_MAX_CHAIN:
             self.state = "crashed"
-            self.logs.append(
-                f"[gateway] crash-looping ({len(self._recent_exits)} exits in "
-                f"{RESPAWN_WINDOW_S}s) — giving up auto-restart. Fix the provider/"
-                f"model in the admin UI, then Start/Restart the gateway."
-            )
+            if self._exit_chain > RESPAWN_MAX_CHAIN:
+                detail = (f"{self._exit_chain} short-lived exits in a row "
+                          f"(each under {RESPAWN_CHAIN_UPTIME_S}s of uptime)")
+            else:
+                detail = f"{len(self._recent_exits)} exits in {RESPAWN_WINDOW_S}s"
+            msg = (f"[gateway] crash-looping ({detail}) — giving up auto-restart. "
+                   f"Check the Logs panel, fix the cause, then Start/Restart the gateway.")
+            self.logs.append(msg)
+            # print() too: a give-up is the terminal state of the supervisor and
+            # must be visible in `railway logs` without opening /setup.
+            print(msg, flush=True)
             return
-        delay = min(RESPAWN_BASE_DELAY * 2 ** (len(self._recent_exits) - 1), RESPAWN_MAX_DELAY)
-        self.logs.append(f"[gateway] restarting in {int(delay)}s (attempt {len(self._recent_exits)})")
+        attempt = max(len(self._recent_exits), self._exit_chain)
+        delay = min(RESPAWN_BASE_DELAY * 2 ** (attempt - 1), RESPAWN_MAX_DELAY)
+        self.logs.append(f"[gateway] restarting in {int(delay)}s (attempt {attempt})")
         await asyncio.sleep(delay)
         # Re-check the deliberate-lifecycle conditions AFTER the backoff sleep: a
         # Stop, Reset, or shutdown issued during the wait must win over the respawn.
@@ -2238,10 +2299,12 @@ def _sweep_stale_backup_tmpdirs() -> None:
         pass
 
 
-# Mirrors hermes' own _EXCLUDED_DIRS (hermes_cli/backup.py, v2026.8.13) so
-# _live_db_names() can never demand a database hermes deliberately skips. That
-# direction matters: a false "incomplete" ABORTS a restore, which is strictly
-# worse than the gap it closes. Re-check this against upstream on a bump.
+# Mirrors hermes' own _EXCLUDED_DIRS (hermes_cli/backup.py, re-verified
+# byte-identical at v2026.9.11) so _live_db_names() can never demand a database
+# hermes deliberately skips. That direction matters: a false "incomplete" ABORTS
+# a restore, which is strictly worse than the gap it closes. Re-check this
+# against upstream on a bump — and check _BACKUP_EXCLUDED_ROOT_DIRS below too,
+# because upstream now has TWO exclusion mechanisms, not one.
 _BACKUP_EXCLUDED_DIRS = {
     "hermes-agent", "__pycache__", ".git", "node_modules", "backups",
     "checkpoints", ".venv", "venv", "site-packages",
@@ -2250,6 +2313,33 @@ _BACKUP_EXCLUDED_DIRS = {
     # live browser-profile dirs (Chromium holds their SQLite files locked).
     "state-snapshots", "browser-profiles", "browser-profile",
 }
+
+# v2026.9.11 added a SECOND mechanism upstream (_EXCLUDED_ROOT_DIRS +
+# _in_excluded_root_dir in hermes_cli/backup.py): three trees skipped ONLY at the
+# top of HERMES_HOME (and at profiles/<name>/), holding machine-scoped bulk data
+# the new local-model runtime downloads — GGUF weights, llama.cpp binaries and a
+# managed Node install, which upstream's own comment calls "routinely tens to
+# hundreds of GB". Root-scoped, not flat: a skills/foo/models/ directory is still
+# backed up, so mirroring these into _BACKUP_EXCLUDED_DIRS would over-exclude.
+# Without this mirror a *.db under any of the three is demanded by
+# _live_db_names() while `hermes backup` deliberately omits it, and the resulting
+# false "incomplete" ABORTS a restore.
+_BACKUP_EXCLUDED_ROOT_DIRS = {"models", "runtimes", "node"}
+
+
+def _in_excluded_root_dir(rel: Path) -> bool:
+    """Mirror of hermes' `_in_excluded_root_dir`: top level only, plus per-profile.
+
+    `rel` is the path relative to HERMES_HOME, filename included — same shape
+    upstream passes, so the `>= 3` profile check lines up with theirs.
+    """
+    parts = rel.parts
+    if not parts:
+        return False
+    return (
+        parts[0] in _BACKUP_EXCLUDED_ROOT_DIRS
+        or (len(parts) >= 3 and parts[0] == "profiles" and parts[2] in _BACKUP_EXCLUDED_ROOT_DIRS)
+    )
 
 
 def _live_db_names() -> set[str]:
@@ -2276,10 +2366,12 @@ def _live_db_names() -> set[str]:
             try:
                 if not path.is_file():
                     continue
-                parents = path.relative_to(root).parts[:-1]
+                rel = path.relative_to(root)
             except (OSError, ValueError):
                 continue
-            if any(part in _BACKUP_EXCLUDED_DIRS for part in parents):
+            if any(part in _BACKUP_EXCLUDED_DIRS for part in rel.parts[:-1]):
+                continue
+            if _in_excluded_root_dir(rel):
                 continue
             found.add(path.name)
     except OSError:
@@ -2327,6 +2419,11 @@ async def api_backup_download(request: Request) -> Response:
     async with backup_lock:
         tmp_dir = tempfile.mkdtemp(prefix="hermes-backup-")
         zip_path = Path(tmp_dir) / "backup.zip"
+        # NOTE: v2026.9.11 gave `hermes backup` a `-k/--keep` (default 3) that
+        # DELETES older archives in the output directory. It is gated on the
+        # output filename starting with hermes' own "hermes-backup-" prefix, so
+        # "backup.zip" here is inert — but that is the only thing making it
+        # inert. Do not rename these outputs to the upstream prefix shape.
         rc, output = await _run_hermes_cli("backup", "-o", str(zip_path))
         if _is_backup_busy(rc, output):
             shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -2440,6 +2537,9 @@ async def api_backup_restore(request: Request) -> Response:
             # secrets suffix avoids a same-second collision silently clobbering
             # a distinct prior snapshot (two restores fired back-to-back).
             snap_path = BACKUP_DIR / f"pre-restore-{int(time.time())}-{secrets.token_hex(4)}.zip"
+            # "pre-restore-*" deliberately does not match hermes' own
+            # "hermes-backup-" prefix, so its v2026.9.11 `--keep 3` auto-prune
+            # never touches these; _prune_pre_restore_snapshots() owns them.
             rc, output = await _run_hermes_cli("backup", "-o", str(snap_path))
             # A lock collision is transient and retryable — say so, instead of
             # reporting it as "the backup command failed", which reads as data
