@@ -165,11 +165,29 @@ except TimeoutError:
                 self.assertFalse(self.server.is_config_complete())
 
     def test_restart_preserves_native_model_and_other_config(self):
-        self.seed("openai-codex", "native-selected-model")
+        for provider, routing in (
+            ("openai-codex", {"base_url": "https://chatgpt.com/backend-api/codex", "api_mode": "codex_responses"}),
+            ("nvidia", {"base_url": "https://proxy.example.invalid/v1", "api_key": "synthetic-proxy-key", "api_mode": "chat_completions"}),
+        ):
+            with self.subTest(provider=provider):
+                self.seed(provider, "native-selected-model")
+                config = self.server._read_config_for_write(self.config)
+                config["model"].update(routing)
+                self.server._write_config_atomic(self.config, config)
+                self.server.write_config_yaml(self.server.read_env(self.env), preserve_model=True)
+                saved = self.server._read_config_for_write(self.config)
+                self.assertEqual(saved["model"], config["model"])
+                self.assertEqual(saved["mcp_servers"]["keep"]["command"], "preserved")
+                self.assertEqual(self.server.read_env(self.env)["MINIMAX_API_KEY"], "synthetic-minimax-key")
+
+    def test_restart_without_a_saved_model_still_clears_stale_routing(self):
+        self.seed("auto", "''")
+        config = self.server._read_config_for_write(self.config)
+        config["model"].update(base_url="https://stale.example.invalid", api_key="synthetic-stale-key", api_mode="chat_completions")
+        self.server._write_config_atomic(self.config, config)
         self.server.write_config_yaml(self.server.read_env(self.env), preserve_model=True)
-        self.assertEqual(self.server.configured_model(), ("native-selected-model", "openai-codex"))
-        self.assertEqual(self.server._read_config_for_write(self.config)["mcp_servers"]["keep"]["command"], "preserved")
-        self.assertEqual(self.server.read_env(self.env)["MINIMAX_API_KEY"], "synthetic-minimax-key")
+        self.assertEqual(self.server._read_config_for_write(self.config)["model"],
+                         {"provider": "auto", "default": "MiniMax-M2.7"})
 
     async def test_config_get_reports_native_model_and_revision_without_raw_keys(self):
         self.seed("openai-codex", "native-selected-model")
@@ -211,11 +229,15 @@ except TimeoutError:
 
     async def test_channel_only_save_preserves_native_model_and_masked_key(self):
         self.seed("openai-codex", "native-selected-model")
+        config = self.server._read_config_for_write(self.config)
+        config["model"].update(base_url="https://chatgpt.com/backend-api/codex", api_mode="codex_responses")
+        self.server._write_config_atomic(self.config, config)
         self.mock_codex()
         result = await self.server.api_config_put(request({"vars": {
             "MINIMAX_API_KEY": "synthet***", "EMAIL_ADDRESS": "fixture@example.invalid"}, "_restart": False}))
         self.assertEqual(result.status_code, 200)
         self.assertEqual(self.server.configured_model(), ("native-selected-model", "openai-codex"))
+        self.assertEqual(self.server._read_config_for_write(self.config)["model"], config["model"])
         self.assertEqual(self.server.read_env(self.env)["LLM_MODEL"], "native-selected-model")
         self.assertEqual(self.server.read_env(self.env)["MINIMAX_API_KEY"], "synthetic-minimax-key")
 
@@ -246,6 +268,18 @@ except TimeoutError:
         self.mock_codex()
         async def pin(provider, model, **kwargs):
             self.assertEqual(self.server.configured_model(), ("MiniMax-M2.7", "minimax"))
+            await self.apply_model(provider, model)
+        self.server.set_active_model_via_hermes = AsyncMock(side_effect=pin)
+        self.assertEqual((await self.server.api_config_put(self.codex_save())).status_code, 200)
+
+    async def test_staged_same_provider_save_preserves_complete_native_model_until_commit(self):
+        self.seed("openai-codex", "previous-codex-model")
+        config = self.server._read_config_for_write(self.config)
+        config["model"].update(base_url="https://chatgpt.com/backend-api/codex", api_mode="codex_responses")
+        self.server._write_config_atomic(self.config, config)
+        self.mock_codex()
+        async def pin(provider, model, **kwargs):
+            self.assertEqual(self.server._read_config_for_write(self.config)["model"], config["model"])
             await self.apply_model(provider, model)
         self.server.set_active_model_via_hermes = AsyncMock(side_effect=pin)
         self.assertEqual((await self.server.api_config_put(self.codex_save())).status_code, 200)

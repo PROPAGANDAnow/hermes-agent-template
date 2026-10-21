@@ -632,7 +632,8 @@ def write_config_yaml(data: dict[str, str], *, reset_model: bool = False, preser
         merged_model = dict(merged.get("model") if isinstance(merged.get("model"), dict) else {})
         # Restarts must not replay a stale .env model over a native-dashboard
         # selection. Only an explicit setup edit owns model changes.
-        if not preserve_model or not (merged_model.get("default") or merged_model.get("model")):
+        preserving_model = preserve_model and bool(merged_model.get("default") or merged_model.get("model"))
+        if not preserving_model:
             if model or not preserve_model:
                 merged_model["default"] = model
         current_provider = str(merged_model.get("provider") or "").strip()
@@ -698,21 +699,16 @@ def write_config_yaml(data: dict[str, str], *, reset_model: bool = False, preser
                 )
                 merged_model["api_key"] = data.get(custom_style_key, "").strip()
                 current_provider = "custom"
-        # A known built-in provider (openrouter, minimax, nvidia, …) resolves
-        # its endpoint + credentials from the provider itself, so any inline
-        # model.base_url/api_key/api_mode is stale. base_url "takes precedence
-        # over provider" upstream (hermes_cli/config.py), so a leftover — e.g.
-        # a former `base_url: https://openrouter.ai/api/v1` from the hermes
-        # dashboard — silently misroutes EVERY provider you later switch to
-        # (all calls forced to that endpoint regardless of the active model).
-        # Strip them here, mirroring hermes' own clear_model_endpoint_credentials()
-        # on a switch-away-from-custom. Skipped only for "custom"/"local" —
-        # hermes' own convention for a user-supplied (or fixed-URL aggregator)
-        # endpoint that legitimately needs its own base_url/api_key set
-        # directly on model.* (see the "custom_style_key" branch above —
-        # hermes' runtime resolver reads model.base_url/api_key directly, NOT
-        # the separate custom_providers[] block below, which is display-only).
-        if current_provider and current_provider.lower() not in ("custom", "local"):
+        # When writing a new built-in assignment, clear old inline routing:
+        # base_url takes precedence over provider upstream, so a former custom
+        # endpoint can silently misroute the newly selected model. Custom/local
+        # providers instead need their inline endpoint and credentials; the
+        # separate custom_providers[] catalog does not supply runtime routing.
+        # Hermes v0.22.2 writes routing fields even for built-ins (Codex writes
+        # base_url/api_mode). A restart or unrelated save must keep the entire
+        # saved assignment; explicit selections still clear stale routing here
+        # or through Hermes' own model/set transaction below.
+        if not preserving_model and current_provider and current_provider.lower() not in ("custom", "local"):
             for _stale in ("base_url", "api_key", "api", "api_mode"):
                 merged_model.pop(_stale, None)
     merged["model"] = merged_model

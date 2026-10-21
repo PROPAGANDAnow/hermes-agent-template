@@ -18,7 +18,7 @@ release.
 - Connect ChatGPT from Setup with a one-time code, confirm a Hermes-listed model before starting, and reconnect or disconnect your account.
 
 ### Bug fixes
-- Dashboard-selected models survive gateway restarts and unrelated setup saves; outdated setup forms are rejected before they can overwrite newer settings.
+- Dashboard-selected models and endpoint settings survive gateway restarts and unrelated setup saves; outdated setup forms are rejected before they can overwrite newer settings.
 - Changing or removing a SuperGrok connection preserves other saved OAuth accounts during token refresh.
 
 ---
